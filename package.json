@@ -1,0 +1,43 @@
+{
+  "name": "ripcord",
+  "version": "1.0.0",
+  "description": "Fast, clean audio extractor for Spotify and YouTube powered by yt-dlp & FFmpeg",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "build:vendor": "esbuild scripts/mcu-entry.js --bundle --format=esm --minify --outfile=public/vendor/mcu.js"
+  },
+  "keywords": [
+    "ripcord",
+    "spotify-downloader",
+    "youtube-to-mp3",
+    "audio-extractor",
+    "yt-dlp",
+    "ffmpeg",
+    "flac",
+    "mp3"
+  ],
+  "author": "Webjuniors & Friends",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rusux64-bit/Ripcord.git"
+  },
+  "homepage": "https://ripcord.webjuniors.org",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "ffmpeg-static": "^5.2.0",
+    "fluent-ffmpeg": "^2.1.3",
+    "node-id3": "^0.2.9"
+  },
+  "devDependencies": {
+    "@material/material-color-utilities": "^0.3.0",
+    "esbuild": "^0.28.2"
+  }
+}

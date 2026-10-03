@@ -1,0 +1,17 @@
+services:
+  ripcord:
+    image: ghcr.io/rusux64-bit/ripcord:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ripcord
+    ports:
+      - "5224:5224"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=5224
+      - DOWNLOAD_CONCURRENCY=2
+    # uncomment this if you have a cookies.txt file to pass bot checks
+    # volumes:
+    #   - ./cookies.txt:/app/cookies.txt:ro

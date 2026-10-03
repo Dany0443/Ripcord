@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Ripcord - pull the audio out of any link</title>
+    <meta name="description"
+        content="Paste a Spotify or YouTube link and get clean audio files with cover art and tags. Fast, free, no account.">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#fff8f4" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#1a120c" media="(prefers-color-scheme: dark)">
+    <meta property="og:title" content="Ripcord">
+    <meta property="og:description" content="Paste a link. Pull the sound out.">
+    <meta property="og:type" content="website">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="favicon.png" type="image/png">
+    <link rel="apple-touch-icon" href="favicon.png">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wdth,wght,GRAD@8..144,25..151,100..1000,-200..150&display=swap">
+    <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=block">
+    <link rel="stylesheet" href="styles.css">
+
+    <script>
+        // Apply the saved theme before first paint so there is no flash.
+        try {
+            var t = localStorage.getItem('ripcord.theme');
+            if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+        } catch (e) { }
+    </script>
+    <script type="module" src="app.js"></script>
+</head>
+
+<body data-stage="input">
+    <a class="skip" href="#url">Skip to the link box</a>
+
+    <div class="backdrop" aria-hidden="true">
+        <span class="blob blob--1"></span>
+        <span class="blob blob--2"></span>
+        <span class="blob blob--3"></span>
+    </div>
+
+    <header class="top-bar">
+        <a class="brand" href="/" aria-label="Ripcord home">
+            <span class="brand__mark"><span class="icon fill" aria-hidden="true">graphic_eq</span></span>
+            <span class="brand__name">Ripcord</span>
+        </a>
+        <div class="top-bar__actions">
+            <button class="icon-btn" id="theme-btn" type="button" aria-label="Theme: automatic" title="Theme">
+                <span class="icon" id="theme-icon" aria-hidden="true">brightness_auto</span>
+            </button>
+            <button class="icon-btn" id="about-btn" type="button" aria-label="About Ripcord" title="About">
+                <span class="icon" aria-hidden="true">info</span>
+            </button>
+        </div>
+    </header>
+
+    <main class="layout">
+        <section class="hero" aria-labelledby="hero-title">
+            <p class="eyebrow rise" style="--i:0"><span class="icon fill" aria-hidden="true">wb_sunny</span><span
+                    id="greeting">Hey there</span></p>
+            <h1 class="display rise" id="hero-title" style="--i:1">
+                <span class="wiggle">Got</span> <span class="wiggle">a</span> <span class="wiggle">link?</span>
+                <em><span class="wiggle">Let's</span> <span class="wiggle">pull</span> <span class="wiggle">the</span>
+                    <span class="wiggle">sound</span> <span class="wiggle">out.</span></em>
+            </h1>
+            <p class="lead rise" style="--i:2">Paste a Spotify or YouTube link and get tidy audio files with cover art
+                and tags. No account, no fuss.</p>
+            <ul class="sources rise" style="--i:3" aria-label="Supported sources">
+                <li><span class="icon" aria-hidden="true">music_note</span>Spotify tracks, albums, playlists</li>
+                <li><span class="icon" aria-hidden="true">smart_display</span>YouTube videos and playlists</li>
+                <li><span class="icon" aria-hidden="true">library_music</span>YouTube Music</li>
+            </ul>
+        </section>
+
+        <section class="stage rise" id="stage" style="--i:2" aria-label="Downloader">
+            <div class="screen-wrap">
+
+                <div class="media" id="media">
+                    <div class="cover" id="cover"><img id="cover-img" alt="" width="96" height="96"></div>
+                    <div class="media__text">
+                        <span class="badge" id="media-badge"><span class="icon"
+                                aria-hidden="true">music_note</span><span id="media-badge-text">Track</span></span>
+                        <h2 class="media__title" id="media-title" tabindex="-1">Title</h2>
+                        <p class="media__artist" id="media-artist"></p>
+                    </div>
+                </div>
+
+                <div class="screen" id="screen-input">
+                    <h2 class="t-title">What are we pulling today?</h2>
+                    <form id="fetch-form" class="stack" novalidate>
+                        <div class="search" id="search">
+                            <span class="icon search__lead" aria-hidden="true">link</span>
+                            <input id="url" name="url" type="text" inputmode="url" autocomplete="off"
+                                autocapitalize="off" spellcheck="false" placeholder="Paste a link here"
+                                aria-describedby="url-help">
+                            <button class="icon-btn" id="paste-btn" type="button" aria-label="Paste from clipboard"
+                                title="Paste">
+                                <span class="icon" id="paste-icon" aria-hidden="true">content_paste</span>
+                            </button>
+                        </div>
+                        <p class="supporting" id="url-help">Spotify, YouTube or YouTube Music links work.</p>
+                        <div class="actions">
+                            <button class="btn btn--filled btn--lg" id="fetch-btn" type="submit">
+                                <span class="icon" id="fetch-icon" aria-hidden="true">arrow_forward</span>
+                                <span id="fetch-label">Continue</span>
+                            </button>
+                        </div>
+                    </form>
+
+                    <div class="recent" id="recent" hidden>
+                        <h3 class="label">Recently pulled</h3>
+                        <ul class="list" id="recent-list"></ul>
+                    </div>
+                </div>
+
+                <div class="screen" id="screen-options">
+                    <div class="stack">
+                        <fieldset class="group">
+                            <legend class="label">Format</legend>
+                            <div class="segmented" role="presentation" id="format-group">
+                                <label><input type="radio" name="format" value="mp3" checked><span>MP3</span></label>
+                                <label><input type="radio" name="format" value="m4a"><span>M4A</span></label>
+                                <label><input type="radio" name="format" value="flac"><span>FLAC</span></label>
+                                <label><input type="radio" name="format" value="wav"><span>WAV</span></label>
+                                <label><input type="radio" name="format" value="ogg"><span>OGG</span></label>
+                            </div>
+                            <p class="supporting" id="format-hint">Plays everywhere. A good default.</p>
+                        </fieldset>
+
+                        <div class="group" id="quality-group">
+                            <div class="label-row">
+                                <label class="label" for="bitrate">Quality</label>
+                                <span class="value" id="bitrate-out">320 kbps</span>
+                            </div>
+                            <div class="slider">
+                                <input type="range" id="bitrate" min="0" max="2" step="1" value="2"
+                                    aria-describedby="bitrate-out">
+                                <div class="slider__ticks" aria-hidden="true">
+                                    <span>128</span><span>192</span><span>320</span></div>
+                            </div>
+                        </div>
+
+                        <label class="switch-row" for="clean">
+                            <span class="switch-row__text">
+                                <strong>Tidy up the title</strong>
+                                <span class="supporting">Drops things like "(Official Video)" from names.</span>
+                            </span>
+                            <span class="switch">
+                                <input type="checkbox" id="clean" role="switch" checked>
+                                <span class="switch__track"><span class="switch__thumb"><span class="icon"
+                                            aria-hidden="true">check</span></span></span>
+                            </span>
+                        </label>
+
+                        <fieldset class="group" id="name-group">
+                            <legend class="label">File name</legend>
+                            <div class="chips" id="name-style">
+                                <label class="chip"><input type="radio" name="namestyle" value="title"
+                                        checked><span><span class="icon"
+                                            aria-hidden="true">check</span>Title</span></label>
+                                <label class="chip"><input type="radio" name="namestyle"
+                                        value="title_artist"><span><span class="icon"
+                                            aria-hidden="true">check</span>Title - Artist</span></label>
+                                <label class="chip"><input type="radio" name="namestyle"
+                                        value="artist_title"><span><span class="icon"
+                                            aria-hidden="true">check</span>Artist - Title</span></label>
+                            </div>
+                            <div class="field">
+                                <input id="filename" type="text" placeholder=" " autocomplete="off" spellcheck="false"
+                                    maxlength="120">
+                                <label for="filename">Name</label>
+                                <span class="field__suffix" id="ext">.mp3</span>
+                            </div>
+                        </fieldset>
+
+                        <p class="callout" id="spotify-note" hidden>
+                            <span class="icon" aria-hidden="true">info</span>
+                            <span>Spotify does not hand out audio, so each song is matched on YouTube. It is usually
+                                right, but not always.</span>
+                        </p>
+
+                        <div class="actions">
+                            <button class="btn btn--tonal btn--lg" id="back-btn" type="button">
+                                <span class="icon" aria-hidden="true">arrow_back</span>Back
+                            </button>
+                            <button class="btn btn--filled btn--lg" id="download-btn" type="button">
+                                <span class="icon" aria-hidden="true">download</span>
+                                <span id="download-label">Download</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="screen" id="screen-working">
+                    <div class="stack">
+                        <h2 class="t-title" id="working-title" tabindex="-1">Warming things up</h2>
+                        <div class="wavy" id="wavy" data-indeterminate="true" role="progressbar"
+                            aria-labelledby="working-title" aria-valuemin="0" aria-valuemax="100"></div>
+                        <div class="meta"><span id="meta-left">Getting started</span><span id="meta-right">0:00</span>
+                        </div>
+                        <p class="supporting" id="working-hint">Big collections take a while to prepare. You can leave
+                            this tab open.</p>
+                        <div class="actions">
+                            <button class="btn btn--tonal" id="cancel-btn" type="button">
+                                <span class="icon" aria-hidden="true">close</span>Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="screen done" id="screen-done">
+                    <div class="burst" id="done-burst" aria-hidden="true"></div>
+                    <span class="done__mark"><span class="icon fill" aria-hidden="true">check</span></span>
+                    <h2 class="t-title" id="done-title" tabindex="-1">All done. Enjoy!</h2>
+                    <p class="supporting" id="done-sub">Your file should be in your downloads.</p>
+                    <div class="actions">
+                        <button class="btn btn--tonal btn--lg" id="again-btn" type="button">
+                            <span class="icon" aria-hidden="true">refresh</span>Rip another
+                        </button>
+                        <button class="btn btn--text btn--lg" id="save-btn" type="button">
+                            <span class="icon" aria-hidden="true">download</span>Download again
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <p>Made with care by <a href="https://webjuniors.org" target="_blank" rel="noopener">Webjuniors</a>. Powered by
+            yt-dlp and FFmpeg. For personal use only.</p>
+    </footer>
+
+    <div class="snackbar" id="snackbar" role="status" aria-live="polite">
+        <span id="snackbar-text"></span>
+        <button class="btn btn--text" id="snackbar-close" type="button">Got it</button>
+    </div>
+
+    <dialog id="about" aria-labelledby="about-title">
+        <div class="dialog__body">
+            <h2 class="t-title" id="about-title">About Ripcord</h2>
+            <ul>
+                <li><span class="icon" aria-hidden="true">bolt</span><span>Paste a link, pick a format, get a file with
+                        cover art and tags baked in.</span></li>
+                <li><span class="icon" aria-hidden="true">search</span><span>Spotify links are matched to YouTube audio,
+                        so a result can occasionally be a different version.</span></li>
+                <li><span class="icon" aria-hidden="true">graphic_eq</span><span>FLAC and WAV are lossless containers.
+                        The source audio is still lossy, so they will not sound better than the original.</span></li>
+                <li><span class="icon" aria-hidden="true">gavel</span><span>Only download things you have the right to.
+                        You are responsible for how you use it.</span></li>
+            </ul>
+        </div>
+        <div class="dialog__actions">
+            <button class="btn btn--text" id="about-close" type="button">Close</button>
+        </div>
+    </dialog>
+
+    <noscript>
+        <p
+            style="position:fixed;inset:auto 16px 16px;padding:14px 18px;border-radius:16px;background:#3b2a1c;color:#fff;text-align:center;">
+            Ripcord needs JavaScript to work. Please turn it on and reload.</p>
+    </noscript>
+</body>
+
+</html>
