@@ -80,6 +80,8 @@ const MAX_COVER_BYTES = positiveIntegerEnv('MAX_COVER_BYTES', 5 * 1024 * 1024, 2
 const MAX_DOWNLOAD_BYTES = positiveIntegerEnv('MAX_DOWNLOAD_BYTES', 100 * 1024 * 1024, 512 * 1024 * 1024);
 const MAX_AUDIO_OUTPUT_BYTES = positiveIntegerEnv('MAX_AUDIO_OUTPUT_BYTES', 150 * 1024 * 1024, 512 * 1024 * 1024);
 const MAX_ZIP_TRACK_BYTES = positiveIntegerEnv('MAX_ZIP_TRACK_BYTES', 40 * 1024 * 1024, 128 * 1024 * 1024);
+// lossless tracks are ~5-10 MB/min, so they need a larger per-track cap than lossy formats
+const zipTrackLimit = format => (format === 'flac' || format === 'wav') ? Math.max(MAX_ZIP_TRACK_BYTES, MAX_AUDIO_OUTPUT_BYTES) : MAX_ZIP_TRACK_BYTES;
 const ENCODE_CONCURRENCY = positiveIntegerEnv('ENCODE_CONCURRENCY', Math.max(1, Math.min(2, os.cpus().length)), 8);
 const YTDLP_CONCURRENT_FRAGMENTS = positiveIntegerEnv('YTDLP_CONCURRENT_FRAGMENTS', 4, 16);
 const WORK_DIR = process.env.WORK_DIR || os.tmpdir();
@@ -323,6 +325,41 @@ app.use('/api', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     next();
 });
+// per-track progress for collection downloads, keyed by a client-generated job id
+const JOB_ID_PATTERN = /^[A-Za-z0-9-]{16,64}$/;
+const MAX_TRACKED_JOBS = 200;
+const downloadJobs = new Map();
+
+function createJob(jobId, tracks) {
+    if (!jobId) return null;
+    if (downloadJobs.size >= MAX_TRACKED_JOBS) downloadJobs.delete(downloadJobs.keys().next().value);
+    const job = {
+        status: 'running',
+        tracks: tracks.map(track => ({
+            title: String(track.title || 'Unknown Track').slice(0, 200),
+            artist: String(track.artist || '').slice(0, 200),
+            state: 'queued',
+            progress: 0
+        }))
+    };
+    downloadJobs.set(jobId, job);
+    return job;
+}
+
+function endJob(jobId, status) {
+    const job = jobId && downloadJobs.get(jobId);
+    if (!job) return;
+    job.status = status;
+    setTimeout(() => { if (downloadJobs.get(jobId) === job) downloadJobs.delete(jobId); }, 2 * 60 * 1000).unref();
+}
+
+// polled about once a second, so it gets its own budget instead of the main API limit
+app.get('/api/progress/:id', createRateLimiter(Math.max(API_RATE_LIMIT_MAX * 20, 2000), 'Too many progress requests.'), rejectCrossSiteRequests, (req, res) => {
+    const job = JOB_ID_PATTERN.test(req.params.id) ? downloadJobs.get(req.params.id) : null;
+    if (!job) return res.status(404).json({ status: 'pending' });
+    res.json(job);
+});
+
 app.use('/api', createRateLimiter(API_RATE_LIMIT_MAX, 'Too many requests. Please wait before trying again.'));
 
 function rejectCrossSiteRequests(req, res, next) {
@@ -411,6 +448,8 @@ function matchTokens(value) {
     return new Set(String(value || '')
         .normalize('NFKD')
         .replace(/[\u0300-\u036f]/g, '')
+        // collapse dotted acronyms such as "B.U.G." into "BUG" so they survive tokenizing
+        .replace(/(?:\p{L}\.){2,}\p{L}?/gu, m => m.replace(/\./g, ''))
         .replace(/([a-z])([A-Z])/g, '$1 $2')
         .toLowerCase()
         .replace(/vevo\b/g, ' ')
@@ -433,10 +472,13 @@ function tokenSimilarity(left, right) {
 
 function scoreSpotifyCandidate(track, candidate) {
     const titleScore = tokenSimilarity(track.title, candidate.title);
-    const artistScore = Math.max(
-        tokenSimilarity(track.artist, [candidate.artist, candidate.uploader, candidate.channel].filter(Boolean).join(' ')),
-        tokenSimilarity(track.artist, candidate.title)
-    );
+    const candidateArtist = [candidate.artist, candidate.uploader, candidate.channel].filter(Boolean).join(' ');
+    const credited = [track.artist, ...String(track.artist || '').split(/\s*,\s*/)].filter(Boolean);
+    // Featured artists are often missing from YouTube titles/channels, so score each credit separately.
+    const artistScore = Math.max(0, ...credited.map(name => Math.max(
+        tokenSimilarity(name, candidateArtist),
+        tokenSimilarity(name, candidate.title)
+    )));
     const expectedDuration = Number(track.durationMs) || null;
     const candidateDuration = Number(candidate.duration) > 0 ? Number(candidate.duration) * 1000 : null;
     let durationScore = null;
@@ -456,7 +498,8 @@ function scoreSpotifyCandidate(track, candidate) {
 }
 
 async function findSpotifyMatch(track, signal) {
-    const query = `${track.title} ${track.artist}`.replace(/[\r\n]+/g, ' ').slice(0, 300).trim();
+    const primaryArtist = String(track.artist || '').split(/\s*,\s*/)[0];
+    const query = `${track.title} ${primaryArtist === 'Unknown Artist' ? '' : primaryArtist}`.replace(/[\r\n]+/g, ' ').slice(0, 300).trim();
     const searchTarget = `ytsearch5:${query}`;
     const args = [
         '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings',
@@ -780,8 +823,13 @@ async function getSpotifyData(url, signal) {
                         const trackData = t.track || t;
                         const title = safeMetadataText(trackData.title || trackData.name, 'Unknown Track');
                         let trackArtists = 'Unknown Artist';
-                        if (trackData.artists && Array.isArray(trackData.artists)) {
-                            trackArtists = safeMetadataText(trackData.artists.map(a => (typeof a === 'string' ? a : a.name)).join(', '), 'Unknown Artist');
+                        if (Array.isArray(trackData.artists) && trackData.artists.length > 0) {
+                            trackArtists = safeMetadataText(trackData.artists.map(a => (typeof a === 'string' ? a : a?.profile?.name || a?.name)).filter(Boolean).join(', '), 'Unknown Artist');
+                        } else if (Array.isArray(trackData.artists?.items) && trackData.artists.items.length > 0) {
+                            trackArtists = safeMetadataText(trackData.artists.items.map(a => a?.profile?.name || a?.name).filter(Boolean).join(', '), 'Unknown Artist');
+                        } else if (typeof trackData.subtitle === 'string' && trackData.subtitle.trim()) {
+                            // Embed trackList entries (playlists/albums) carry the artist(s) in `subtitle`.
+                            trackArtists = safeMetadataText(trackData.subtitle.replace(/\u00a0/g, ' '), 'Unknown Artist');
                         }
                         tracks.push({
                             title,
@@ -829,7 +877,7 @@ async function getSpotifyData(url, signal) {
 }
 
 // download the raw audio stream to a temp file using yt-dlp
-async function downloadToTemp(targetUrl, extension = 'webm', signal, targetFormat) {
+async function downloadToTemp(targetUrl, extension = 'webm', signal, targetFormat, onProgress) {
     const tempPath = path.join(WORK_DIR, `ripcord_${randomUUID()}.${extension}`);
 
     return new Promise((resolve, reject) => {
@@ -851,9 +899,20 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
             ytdlpArgs.push('--cookies', COOKIES_PATH);
         }
 
+        if (onProgress) {
+            ytdlpArgs.push('--newline', '--progress', '--progress-template',
+                'download:RIPCORD_PROGRESS %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s');
+        }
+
         ytdlpArgs.push('-o', tempPath, '--', targetUrl);
 
         const ytdlp = spawn('yt-dlp', ytdlpArgs);
+        ytdlp.stdout.on('data', chunk => {
+            if (!onProgress) return;
+            const matches = [...chunk.toString().matchAll(/RIPCORD_PROGRESS (\d+) (\d+(?:\.\d+)?)/g)];
+            const last = matches[matches.length - 1];
+            if (last && Number(last[2]) > 0) onProgress(Math.min(1, Number(last[1]) / Number(last[2])));
+        });
         let timedOut = false;
 
         const timeout = setTimeout(() => {
@@ -1089,10 +1148,11 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
     }
 }
 
-async function downloadPlaylistTrack(track, index, audioFormat, signal) {
+async function downloadPlaylistTrack(track, index, audioFormat, signal, report = () => { }) {
     const tempFiles = [];
 
     try {
+        report(index, { state: 'matching', progress: 0 });
         const title = String(track.title || 'Unknown Track').slice(0, 200);
         const artist = String(track.artist || 'Unknown Artist').slice(0, 200);
         Logger.info(`[Track ${index + 1}] Downloading: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
@@ -1105,7 +1165,9 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal) {
             downloadTarget = await findSpotifyMatch({ ...track, title, artist }, signal);
         }
 
-        const downloadPromise = downloadToTemp(downloadTarget, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat);
+        report(index, { state: 'downloading', progress: 0 });
+        const downloadPromise = downloadToTemp(downloadTarget, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat,
+            fraction => report(index, { state: 'downloading', progress: fraction }));
         let tempImgPath = '';
         const safeThumbnail = parseCoverUrl(track.thumbnail);
 
@@ -1132,17 +1194,19 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal) {
         return { track, index, title, artist, tempAudioPath, tempImgPath };
     } catch (err) {
         Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - ${err.message}`);
+        report(index, { state: 'failed', progress: 1, error: /search result/i.test(err.message) ? 'No match found' : 'Download failed' });
         cleanupFiles(tempFiles);
         return null;
     }
 }
 
 // convert one downloaded song so it can be added to the zip file
-async function processPlaylistTrack(source, audioBitrate, audioFormat, signal) {
+async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, report = () => { }) {
     const { track, index, title, artist, tempAudioPath, tempImgPath } = source;
     const tempFiles = [tempAudioPath, tempImgPath].filter(Boolean);
 
     try {
+        report(index, { state: 'encoding', progress: 0 });
         Logger.info(`[Track ${index + 1}] Encoding: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
         const tempOutPath = path.join(WORK_DIR, `track_${randomUUID()}.${audioFormat}`);
         tempFiles.push(tempOutPath);
@@ -1152,30 +1216,32 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal) {
         Logger.info(copyAudio
             ? `[Track ${index + 1}] Remuxing ${sourceCodec} audio into [${audioFormat.toUpperCase()}]`
             : `[Track ${index + 1}] Encoding audio to [${audioFormat.toUpperCase()}] at ${audioBitrate} kbps`);
-        const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, MAX_ZIP_TRACK_BYTES, copyAudio);
+        const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, zipTrackLimit(audioFormat), copyAudio);
         await runFfmpeg(args, 'Track encoding timed out.', signal);
         if (signal?.aborted) throw new Error('Request cancelled.');
-        if (fs.statSync(tempOutPath).size >= MAX_ZIP_TRACK_BYTES) throw new Error('Playlist track exceeds the allowed size.');
+        if (fs.statSync(tempOutPath).size >= zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
 
         if (tempImgPath && fs.existsSync(tempOutPath) && (audioFormat === 'ogg' || audioFormat === 'flac')) {
             injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
         }
 
-        if (fs.statSync(tempOutPath).size > MAX_ZIP_TRACK_BYTES) throw new Error('Playlist track exceeds the allowed size.');
+        if (fs.statSync(tempOutPath).size > zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
         const safeName = sanitizeFilename(`${String(index + 1).padStart(2, '0')} - ${title} - ${artist}.${audioFormat}`);
 
         cleanupFiles(tempFiles.filter(file => file !== tempOutPath));
+        report(index, { state: 'done', progress: 1 });
         return { name: safeName, filePath: tempOutPath };
 
     } catch (err) {
         Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - ${err.message}`);
+        report(index, { state: 'failed', progress: 1, error: /size/i.test(err.message) ? 'Too large' : 'Encoding failed' });
         cleanupFiles(tempFiles);
         return null;
     }
 }
 
 // worker function that processes the actual download request
-async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal) {
+async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId = null) {
     try {
         Logger.info(`Task started (${audioFormat.toUpperCase()})`);
         if (signal.aborted) return;
@@ -1264,6 +1330,10 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
             const tracks = collectionData.tracks.slice(0, MAX_PLAYLIST_TRACKS);
             let addedTracks = 0;
+            const job = createJob(jobId, tracks);
+            const report = (index, patch) => {
+                if (job?.tracks[index]) Object.assign(job.tracks[index], patch);
+            };
 
             try {
                 const handoffQueue = new AsyncBoundedQueue(4);
@@ -1273,7 +1343,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     while (!signal.aborted) {
                         const index = nextTrack++;
                         if (index >= tracks.length) return;
-                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal);
+                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal, report);
                         if (!downloaded) continue;
                         try {
                             await handoffQueue.push(downloaded);
@@ -1287,7 +1357,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     while (!signal.aborted) {
                         const downloaded = await handoffQueue.shift();
                         if (!downloaded) return;
-                        const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal);
+                        const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal, report);
                         if (signal.aborted && result?.filePath) cleanupFiles([result.filePath]);
                         else if (result) encodedResults[downloaded.index] = result;
                     }
@@ -1314,10 +1384,12 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 if (signal.aborted) throw new Error('Request cancelled.');
                 if (addedTracks === 0) throw new Error('No tracks could be processed.');
                 await archive.finalize();
+                endJob(jobId, 'finished');
                 Logger.success(`Archive completed: ${zipName}`);
             } finally {
                 signal.removeEventListener('abort', onAbort);
                 cleanupTrackFiles();
+                if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed');
             }
             return;
         }
@@ -1374,6 +1446,7 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                     type: 'collection',
                     title: ytData.name,
                     trackCount: ytData.tracks.length,
+                    tracks: ytData.tracks.map(t => ({ title: t.title, artist: t.artist || '' })),
                     thumbnail: ytData.tracks[0]?.thumbnail || ''
                 });
             } finally {
@@ -1403,6 +1476,7 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                 type: 'collection',
                 title: spotifyData.name,
                 trackCount: spotifyData.tracks.length,
+                tracks: spotifyData.tracks.map(t => ({ title: t.title, artist: t.artist === 'Unknown Artist' ? '' : t.artist })),
                 thumbnail: spotifyData.thumbnail
             });
         } else {
@@ -1442,8 +1516,10 @@ app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
     parsedUrl.hash = '';
     const safeFilename = sanitizeFilename(filename);
 
+    const jobId = typeof req.query.job === 'string' && JOB_ID_PATTERN.test(req.query.job) ? req.query.job : null;
+
     const accepted = downloadQueue.addTask(
-        signal => executeDownloadTask(parsedUrl.href, audioBitrate, audioFormat, safeFilename, res, signal),
+        signal => executeDownloadTask(parsedUrl.href, audioBitrate, audioFormat, safeFilename, res, signal, jobId),
         res
     );
     if (!accepted) {
