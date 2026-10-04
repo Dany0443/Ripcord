@@ -4,6 +4,7 @@ A clean, self-hosted web tool for extracting tagged audio from Spotify and YouTu
 
 Hosted under [webjuniors.org](https://webjuniors.org) platform.
 
+
 Currently available at: [ripcord.webjuniors.org](https://dev-ripcord.webjuniors.org).
 
 ---
@@ -20,7 +21,7 @@ Supported formats: MP3, M4A, FLAC, WAV, and OGG.
 
 - **Metadata Resolution**: Scrapes embed schemas for Spotify tracks and playlists; queries YouTube oEmbed and `yt-dlp --flat-playlist` to discover tracklists without full downloads.
 - **Audio Extraction**: Spawns `yt-dlp` with strict process boundaries (`--`) to stream source audio directly to standard output without downloading video files.
-- **Spotify Matching**: Because Spotify does not expose raw audio, each track is matched against YouTube via internal search queries (`ytsearch1:`) prior to conversion.
+- **Spotify Matching**: Because Spotify does not expose raw audio, Ripcord ranks multiple YouTube search results by title, artist, and track duration, then downloads the best result only when it clears a confidence threshold.
 - **Transcoding & Tagging**: Pipes raw audio through FFmpeg to encode the selected format, embeds ID3v2/Vorbis tags, and applies high-resolution cover art fetched from CDNs.
 - **Streamed Output**: Single tracks stream directly over HTTP. Multi-track collections are transcoded in bounded concurrent batches and piped straight into an `archiver` ZIP stream, using minimal server disk space.
 
@@ -64,7 +65,7 @@ docker compose up -d
 ## Notes & Limitations
 
 - **Source Fidelity**: YouTube audio streams are lossy (typically 128-160 kbps Opus/AAC). Selecting FLAC or WAV provides an uncompressed container, but cannot restore frequencies absent from the source stream.
-- **Spotify Accuracy**: Audio matching for Spotify links relies on search heuristics, which can occasionally resolve to alternate edits or live recordings.
+- **Spotify Accuracy**: Audio matching compares search-result titles, artist/channel metadata, and duration. Alternate edits can still pass when their metadata closely matches, and low-confidence results are skipped.
 - **Bot Detection**: When hosting on cloud VPS providers, provide a Netscape-formatted `cookies.txt` or set `YTDLP_COOKIES_PATH` in `.env` if YouTube challenges requests.
 - **Fair Use**: Intended solely for personal archiving and educational purposes.
 

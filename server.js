@@ -399,6 +399,124 @@ function safeMetadataText(value, fallback = '') {
     return text.replace(/[\x00-\x1F\x7F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200) || fallback;
 }
 
+function getSpotifyDurationMs(track) {
+    const raw = track?.duration_ms ?? track?.durationMs ?? track?.duration?.totalMilliseconds ?? track?.duration?.milliseconds ?? track?.duration;
+    const duration = Number(raw);
+    if (!Number.isFinite(duration) || duration <= 0) return null;
+    // Spotify embed payloads usually use milliseconds; tolerate second-based variants.
+    return duration < 1000 ? Math.round(duration * 1000) : Math.round(duration);
+}
+
+function matchTokens(value) {
+    return new Set(String(value || '')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .toLowerCase()
+        .replace(/vevo\b/g, ' ')
+        .replace(/&/g, ' and ')
+        .replace(/\b(?:official|audio|video|lyrics?|visualizer|hd|4k|topic)\b/g, ' ')
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter(token => token.length > 1));
+}
+
+function tokenSimilarity(left, right) {
+    const a = matchTokens(left);
+    const b = matchTokens(right);
+    if (!a.size || !b.size) return 0;
+    let overlap = 0;
+    for (const token of a) if (b.has(token)) overlap++;
+    return (2 * overlap) / (a.size + b.size);
+}
+
+function scoreSpotifyCandidate(track, candidate) {
+    const titleScore = tokenSimilarity(track.title, candidate.title);
+    const artistScore = Math.max(
+        tokenSimilarity(track.artist, [candidate.artist, candidate.uploader, candidate.channel].filter(Boolean).join(' ')),
+        tokenSimilarity(track.artist, candidate.title)
+    );
+    const expectedDuration = Number(track.durationMs) || null;
+    const candidateDuration = Number(candidate.duration) > 0 ? Number(candidate.duration) * 1000 : null;
+    let durationScore = null;
+
+    if (expectedDuration && candidateDuration) {
+        const differenceSeconds = Math.abs(expectedDuration - candidateDuration) / 1000;
+        // A much longer/shorter result is usually a mix, compilation, or wrong song.
+        if (differenceSeconds > Math.max(40, expectedDuration / 1000 * 0.25)) return null;
+        durationScore = Math.max(0, 1 - differenceSeconds / Math.max(20, expectedDuration / 1000 * 0.18));
+    }
+
+    const confidence = durationScore === null
+        ? titleScore * 0.64 + artistScore * 0.36
+        : titleScore * 0.54 + artistScore * 0.30 + durationScore * 0.16;
+    if (titleScore < 0.42 || (artistScore < 0.18 && titleScore < 0.82) || confidence < 0.58) return null;
+    return { confidence, titleScore, artistScore, durationScore };
+}
+
+async function findSpotifyMatch(track, signal) {
+    const query = `${track.title} ${track.artist}`.replace(/[\r\n]+/g, ' ').slice(0, 300).trim();
+    const searchTarget = `ytsearch5:${query}`;
+    const args = [
+        '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings',
+        '--extractor-args', 'youtube:player_client=android,web'
+    ];
+    if (COOKIES_PATH) args.push('--cookies', COOKIES_PATH);
+    args.push('--', searchTarget);
+
+    const result = await new Promise((resolve, reject) => {
+        if (signal?.aborted) return reject(new Error('Request cancelled.'));
+        const ytdlp = spawn('yt-dlp', args);
+        let output = '';
+        let outputBytes = 0;
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+            timedOut = true;
+            ytdlp.kill('SIGKILL');
+        }, 30000);
+        const onAbort = () => ytdlp.kill('SIGKILL');
+        signal?.addEventListener('abort', onAbort, { once: true });
+        ytdlp.stdout.on('data', chunk => {
+            outputBytes += chunk.length;
+            if (outputBytes > 2 * 1024 * 1024) ytdlp.kill('SIGKILL');
+            else output += chunk.toString();
+        });
+        ytdlp.stderr.on('data', data => Logger.warn(`Spotify match search: ${data.toString().trim()}`));
+        ytdlp.on('error', error => {
+            clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
+            reject(error);
+        });
+        ytdlp.on('close', code => {
+            clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
+            if (signal?.aborted) return reject(new Error('Request cancelled.'));
+            if (timedOut) return reject(new Error('Spotify match search timed out.'));
+            if (outputBytes > 2 * 1024 * 1024) return reject(new Error('Spotify match search returned too much data.'));
+            if (code !== 0 || !output.trim()) return reject(new Error('No YouTube search results were found.'));
+            try {
+                const data = JSON.parse(output);
+                resolve(Array.isArray(data.entries) ? data.entries : [data]);
+            } catch {
+                reject(new Error('Unable to read YouTube search results.'));
+            }
+        });
+    });
+
+    const ranked = result.map(candidate => {
+        const videoId = String(candidate.id || candidate.url || '');
+        if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null;
+        const score = scoreSpotifyCandidate(track, candidate);
+        return score ? { candidate, videoId, score } : null;
+    }).filter(Boolean).sort((a, b) => b.score.confidence - a.score.confidence);
+
+    if (!ranked.length) throw new Error('No search result matched the Spotify title, artist, and duration closely enough.');
+    const best = ranked[0];
+    Logger.info(`[Spotify match] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(best.candidate.title || '')} (confidence ${(best.score.confidence * 100).toFixed(0)}%)`);
+    return `https://www.youtube.com/watch?v=${best.videoId}`;
+}
+
 // clean up filenames so they do not break the filesystem
 function sanitizeFilename(name) {
     if (typeof name !== 'string' || !name) return 'audio_track';
@@ -652,7 +770,8 @@ async function getSpotifyData(url, signal) {
                 tracks.push({
                     title: safeMetadataText(entity?.name, 'Unknown Track'),
                     artist: safeMetadataText(artistName, 'Unknown Artist'),
-                    thumbnail: coverImage
+                    thumbnail: coverImage,
+                    durationMs: getSpotifyDurationMs(entity)
                 });
             } else {
                 const rawTracks = findTracks(data)?.slice(0, MAX_PLAYLIST_TRACKS);
@@ -664,7 +783,12 @@ async function getSpotifyData(url, signal) {
                         if (trackData.artists && Array.isArray(trackData.artists)) {
                             trackArtists = safeMetadataText(trackData.artists.map(a => (typeof a === 'string' ? a : a.name)).join(', '), 'Unknown Artist');
                         }
-                        tracks.push({ title, artist: trackArtists, thumbnail: coverImage });
+                        tracks.push({
+                            title,
+                            artist: trackArtists,
+                            thumbnail: coverImage,
+                            durationMs: getSpotifyDurationMs(trackData)
+                        });
                     });
                 }
             }
@@ -978,8 +1102,7 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal) {
             if (!isSafeUrl(track.url)) throw new Error('Invalid playlist track URL.');
             downloadTarget = track.url;
         } else {
-            const cleanArtist = artist.replace(/,/g, ' ');
-            downloadTarget = `ytsearch1:${title} ${cleanArtist}`;
+            downloadTarget = await findSpotifyMatch({ ...track, title, artist }, signal);
         }
 
         const downloadPromise = downloadToTemp(downloadTarget, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat);
@@ -1084,9 +1207,8 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', mimeType);
             const spotifyData = await getSpotifyData(url, signal);
             const track = spotifyData.tracks[0];
-            const cleanArtist = track.artist.replace(/,/g, ' ');
-            const searchQuery = `ytsearch1:${track.title} ${cleanArtist}`;
-            await processAndStreamAudio(searchQuery, audioBitrate, audioFormat, track.thumbnail, res, track.title, track.artist, signal);
+            const matchUrl = await findSpotifyMatch(track, signal);
+            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, track.title, track.artist, signal);
             return;
         }
 
