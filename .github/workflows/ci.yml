@@ -30,6 +30,7 @@ jobs:
         run: |
           node --check server.js
           node --check public/app.js
+          node --check public/theme.js
 
       - name: Test vendor bundle compilation
         run: npm run build:vendor

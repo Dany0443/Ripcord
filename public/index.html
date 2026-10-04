@@ -25,13 +25,7 @@
         href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=block">
     <link rel="stylesheet" href="styles.css">
 
-    <script>
-        // Apply the saved theme before first paint so there is no flash.
-        try {
-            var t = localStorage.getItem('ripcord.theme');
-            if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
-        } catch (e) { }
-    </script>
+    <script src="theme.js"></script>
     <script type="module" src="app.js"></script>
 </head>
 
@@ -68,13 +62,6 @@
                 <em><span class="wiggle">Let's</span> <span class="wiggle">pull</span> <span class="wiggle">the</span>
                     <span class="wiggle">sound</span> <span class="wiggle">out.</span></em>
             </h1>
-            <p class="lead rise" style="--i:2">Paste a Spotify or YouTube link and get tidy audio files with cover art
-                and tags. No account, no fuss.</p>
-            <ul class="sources rise" style="--i:3" aria-label="Supported sources">
-                <li><span class="icon" aria-hidden="true">music_note</span>Spotify tracks, albums, playlists</li>
-                <li><span class="icon" aria-hidden="true">smart_display</span>YouTube videos and playlists</li>
-                <li><span class="icon" aria-hidden="true">library_music</span>YouTube Music</li>
-            </ul>
         </section>
 
         <section class="stage rise" id="stage" style="--i:2" aria-label="Downloader">
