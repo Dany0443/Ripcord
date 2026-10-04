@@ -23,8 +23,8 @@ RUN npm ci --omit=dev
 # copy the rest of the project files
 COPY . .
 
-# make a temporary folder for downloads
-RUN mkdir -p /tmp/ripcord && chmod 777 /tmp/ripcord
+# Run the network-facing service without root privileges.
+USER node
 
 EXPOSE 5224
 

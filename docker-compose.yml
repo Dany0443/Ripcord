@@ -9,9 +9,15 @@ services:
       - "5224:5224"
     restart: unless-stopped
     environment:
-      - NODE_ENV=production
-      - PORT=5224
-      - DOWNLOAD_CONCURRENCY=2
-    # uncomment this if you have a cookies.txt file to pass bot checks
+      NODE_ENV: production
+      PORT: ${PORT:-5224}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-900000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+      DOWNLOAD_CONCURRENCY: ${DOWNLOAD_CONCURRENCY:-4}
+      ENCODE_CONCURRENCY: ${ENCODE_CONCURRENCY:-2}
+      MAX_QUEUED_DOWNLOADS: ${MAX_QUEUED_DOWNLOADS:-8}
+      MAX_PLAYLIST_TRACKS: ${MAX_PLAYLIST_TRACKS:-30}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
+    # Optional: mount cookies.txt if hosting on a datacenter IP
     # volumes:
     #   - ./cookies.txt:/app/cookies.txt:ro

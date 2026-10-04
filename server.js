@@ -1,29 +1,37 @@
 require('dotenv').config();
+process.umask(0o077);
 const express = require('express');
-const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawn, spawnSync, execSync } = require('child_process');
+const { randomUUID } = require('node:crypto');
+const { Transform } = require('node:stream');
+const { spawn, spawnSync } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
-const archiver = require('archiver');
-const NodeID3 = require('node-id3');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 
-// check if ffmpeg is on the system, otherwise use the bundled one
-let ffmpegPath = 'ffmpeg';
-try {
-    const checkFfmpeg = spawnSync('which', ['ffmpeg']);
-    if (checkFfmpeg.status === 0 && checkFfmpeg.stdout.toString().trim()) {
-        ffmpegPath = checkFfmpeg.stdout.toString().trim();
-    } else if (ffmpegStatic) {
-        ffmpegPath = ffmpegStatic;
+function findExecutableInPath(command) {
+    const extensions = process.platform === 'win32'
+        ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';')
+        : [''];
+
+    for (const directory of (process.env.PATH || '').split(path.delimiter)) {
+        for (const extension of extensions) {
+            const candidate = path.resolve(directory || '.', `${command}${extension}`);
+            try {
+                fs.accessSync(candidate, fs.constants.X_OK);
+                return candidate;
+            } catch (e) { }
+        }
     }
-} catch (e) {
-    if (ffmpegStatic) ffmpegPath = ffmpegStatic;
+    return null;
 }
+
+// Resolve directly from PATH so broken local `which` shims cannot hide system FFmpeg.
+const ffmpegPath = findExecutableInPath('ffmpeg') || ffmpegStatic || 'ffmpeg';
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 // make sure yt-dlp is installed and in the system path
@@ -35,10 +43,11 @@ const ytdlpVersion = ytdlpAvailable ? checkYtdlp.stdout.toString().trim() : 'NOT
 const Logger = {
     _format: (level, msg) => {
         const time = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        const safeMessage = String(msg).replace(/[\x00-\x1F\x7F]/g, ' ').slice(0, 2000);
         const colors = {
             INFO: '\x1b[36m', SUCCESS: '\x1b[32m', WARN: '\x1b[33m', ERROR: '\x1b[31m', RESET: '\x1b[0m'
         };
-        return `${colors[level] || ''}[${time}] [${level}]${colors.RESET} ${msg}`;
+        return `${colors[level] || ''}[${time}] [${level}]${colors.RESET} ${safeMessage}`;
     },
     info: (msg) => console.log(Logger._format('INFO', msg)),
     success: (msg) => console.log(Logger._format('SUCCESS', msg)),
@@ -50,9 +59,73 @@ Logger.info('Ripcord audio engine initializing');
 Logger.info(`yt-dlp version: ${ytdlpVersion}`);
 Logger.info(`ffmpeg path: ${ffmpegPath}`);
 
+function positiveIntegerEnv(name, fallback, max) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return fallback;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1 || value > max) {
+        throw new Error(`${name} must be an integer between 1 and ${max}.`);
+    }
+    return value;
+}
+
+const RATE_LIMIT_WINDOW_MS = positiveIntegerEnv('RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000, 24 * 60 * 60 * 1000);
+const API_RATE_LIMIT_MAX = positiveIntegerEnv('RATE_LIMIT_MAX', 120, 10000);
+const DOWNLOAD_CONCURRENCY = positiveIntegerEnv('DOWNLOAD_CONCURRENCY', 4, 8);
+const METADATA_CONCURRENCY = positiveIntegerEnv('METADATA_CONCURRENCY', DOWNLOAD_CONCURRENCY, 8);
+const MAX_QUEUED_DOWNLOADS = positiveIntegerEnv('MAX_QUEUED_DOWNLOADS', 8, 100);
+const MAX_PLAYLIST_TRACKS = positiveIntegerEnv('MAX_PLAYLIST_TRACKS', 30, 100);
+const MAX_PLAYLIST_OUTPUT_BYTES = positiveIntegerEnv('MAX_PLAYLIST_OUTPUT_BYTES', 2 * 1024 * 1024, 16 * 1024 * 1024);
+const MAX_COVER_BYTES = positiveIntegerEnv('MAX_COVER_BYTES', 5 * 1024 * 1024, 20 * 1024 * 1024);
+const MAX_DOWNLOAD_BYTES = positiveIntegerEnv('MAX_DOWNLOAD_BYTES', 100 * 1024 * 1024, 512 * 1024 * 1024);
+const MAX_AUDIO_OUTPUT_BYTES = positiveIntegerEnv('MAX_AUDIO_OUTPUT_BYTES', 150 * 1024 * 1024, 512 * 1024 * 1024);
+const MAX_ZIP_TRACK_BYTES = positiveIntegerEnv('MAX_ZIP_TRACK_BYTES', 40 * 1024 * 1024, 128 * 1024 * 1024);
+const ENCODE_CONCURRENCY = positiveIntegerEnv('ENCODE_CONCURRENCY', Math.max(1, Math.min(2, os.cpus().length)), 8);
+const YTDLP_CONCURRENT_FRAGMENTS = positiveIntegerEnv('YTDLP_CONCURRENT_FRAGMENTS', 4, 16);
+const WORK_DIR = process.env.WORK_DIR || os.tmpdir();
+if (!path.isAbsolute(WORK_DIR)) throw new Error('WORK_DIR must be an absolute path.');
+fs.mkdirSync(WORK_DIR, { recursive: true });
+const YTDLP_USE_ARIA2C = String(process.env.YTDLP_USE_ARIA2C || '').toLowerCase() === 'true';
+const TRUST_PROXY_HOPS_VALUE = process.env.TRUST_PROXY_HOPS === undefined || process.env.TRUST_PROXY_HOPS === ''
+    ? 0
+    : Number(process.env.TRUST_PROXY_HOPS);
+if (!Number.isSafeInteger(TRUST_PROXY_HOPS_VALUE) || TRUST_PROXY_HOPS_VALUE < 0 || TRUST_PROXY_HOPS_VALUE > 5) {
+    throw new Error('TRUST_PROXY_HOPS must be an integer between 0 and 5.');
+}
+const TRUST_PROXY_HOPS = TRUST_PROXY_HOPS_VALUE || false;
+
 if (!ytdlpAvailable) {
     Logger.error('yt-dlp is not installed or not in PATH. Please install yt-dlp: https://github.com/yt-dlp/yt-dlp');
 }
+
+const checkAria2c = spawnSync('aria2c', ['--version']);
+const aria2cAvailable = checkAria2c.status === 0;
+Logger.info(`aria2c: ${aria2cAvailable ? 'available' : 'not installed'}${YTDLP_USE_ARIA2C && aria2cAvailable ? ' (enabled)' : ''}`);
+
+function cleanupStaleWorkFiles() {
+    const staleBefore = Date.now() - 6 * 60 * 60 * 1000;
+    const prefixes = ['ripcord_', 'out_', 'track_', 'cover_', 'tagged_', 'comments_'];
+    let removed = 0;
+    try {
+        for (const entry of fs.readdirSync(WORK_DIR, { withFileTypes: true })) {
+            if (!entry.isFile() || !prefixes.some(prefix => entry.name.startsWith(prefix))) continue;
+            const filePath = path.join(WORK_DIR, entry.name);
+            try {
+                if (fs.statSync(filePath).mtimeMs < staleBefore) {
+                    fs.unlinkSync(filePath);
+                    removed++;
+                }
+            } catch (error) {
+                Logger.warn(`Unable to sweep temporary file ${entry.name}: ${error.message}`);
+            }
+        }
+    } catch (error) {
+        Logger.warn(`Unable to sweep work directory ${WORK_DIR}: ${error.message}`);
+    }
+    Logger.info(`Temporary file sweep removed ${removed} stale file(s) from ${WORK_DIR}`);
+}
+
+cleanupStaleWorkFiles();
 
 // optional cookies file if youtube starts blocking downloads
 const COOKIES_PATH = process.env.YTDLP_COOKIES_PATH || (fs.existsSync(path.join(__dirname, 'cookies.txt')) ? path.join(__dirname, 'cookies.txt') : null);
@@ -62,83 +135,282 @@ if (COOKIES_PATH) {
 
 // simple download queue so we don't melt the cpu with too many conversions
 class DownloadQueue {
-    constructor(concurrency = 2) {
+    constructor(concurrency = DOWNLOAD_CONCURRENCY, maxQueued = MAX_QUEUED_DOWNLOADS) {
         this.concurrency = concurrency;
+        this.maxQueued = maxQueued;
         this.running = 0;
         this.queue = [];
     }
 
-    addTask(task) {
-        this.queue.push(task);
+    addTask(task, res) {
+        if (this.running >= this.concurrency && this.queue.length >= this.maxQueued) return false;
+
+        const entry = { task, res, controller: new AbortController(), started: false };
+        entry.onClose = () => {
+            if (res.writableEnded) return;
+            entry.controller.abort();
+            if (!entry.started) this.queue = this.queue.filter(queued => queued !== entry);
+        };
+        res.once('close', entry.onClose);
+        this.queue.push(entry);
         Logger.info(`[Queue] Task queued. Position: ${this.queue.length}. Running: ${this.running}/${this.concurrency}`);
         this.process();
+        return true;
     }
 
     process() {
         if (this.running >= this.concurrency || this.queue.length === 0) return;
 
         this.running++;
-        const task = this.queue.shift();
+        const entry = this.queue.shift();
+        entry.started = true;
 
-        Promise.resolve(task())
+        if (entry.controller.signal.aborted || entry.res.destroyed) {
+            entry.res.removeListener('close', entry.onClose);
+            this.running--;
+            this.process();
+            return;
+        }
+
+        Promise.resolve(entry.task(entry.controller.signal))
             .catch(err => Logger.error(`[Queue] Task failed: ${err.message}`))
             .finally(() => {
+                entry.res.removeListener('close', entry.onClose);
                 this.running--;
                 this.process();
             });
     }
 }
 
-const concurrencyLimit = parseInt(process.env.DOWNLOAD_CONCURRENCY, 10) || 2;
-const downloadQueue = new DownloadQueue(concurrencyLimit);
+// small semaphore so playlist metadata lookups do not spawn without a global limit
+class MetadataSemaphore {
+    constructor(concurrency = METADATA_CONCURRENCY, maxQueued = MAX_QUEUED_DOWNLOADS) {
+        this.concurrency = concurrency;
+        this.maxQueued = maxQueued;
+        this.running = 0;
+        this.queue = [];
+    }
+
+    tryAcquire() {
+        if (this.running < this.concurrency) {
+            this.running++;
+            const acquisition = Promise.resolve(this.createRelease());
+            acquisition.cancel = () => { };
+            return acquisition;
+        }
+        if (this.queue.length >= this.maxQueued) return null;
+
+        let resolveAcquisition;
+        let rejectAcquisition;
+        const acquisition = new Promise((resolve, reject) => {
+            resolveAcquisition = resolve;
+            rejectAcquisition = reject;
+        });
+        const waiter = { resolve: resolveAcquisition, reject: rejectAcquisition, cancelled: false };
+        acquisition.cancel = () => {
+            if (waiter.cancelled) return;
+            waiter.cancelled = true;
+            this.queue = this.queue.filter(queued => queued !== waiter);
+            waiter.reject(new Error('Metadata request cancelled.'));
+        };
+        this.queue.push(waiter);
+        return acquisition;
+    }
+
+    createRelease() {
+        let released = false;
+        return () => {
+            if (released) return;
+            released = true;
+            this.running--;
+            while (this.queue.length > 0) {
+                const waiter = this.queue.shift();
+                if (waiter.cancelled) continue;
+                this.running++;
+                waiter.resolve(this.createRelease());
+                break;
+            }
+        };
+    }
+}
+
+class AsyncBoundedQueue {
+    constructor(capacity) {
+        this.capacity = capacity;
+        this.items = [];
+        this.readers = [];
+        this.writers = [];
+        this.closed = false;
+    }
+
+    async push(value) {
+        if (this.closed) throw new Error('Queue is closed.');
+        if (this.readers.length > 0) {
+            this.readers.shift()(value);
+            return;
+        }
+        if (this.items.length < this.capacity) {
+            this.items.push(value);
+            return;
+        }
+        await new Promise((resolve, reject) => this.writers.push({ value, resolve, reject }));
+    }
+
+    async shift() {
+        if (this.items.length > 0) {
+            const value = this.items.shift();
+            const writer = this.writers.shift();
+            if (writer) {
+                this.items.push(writer.value);
+                writer.resolve();
+            }
+            return value;
+        }
+        if (this.writers.length > 0) {
+            const writer = this.writers.shift();
+            writer.resolve();
+            return writer.value;
+        }
+        if (this.closed) return null;
+        return new Promise(resolve => this.readers.push(resolve));
+    }
+
+    close(error = new Error('Queue is closed.')) {
+        if (this.closed) return;
+        this.closed = true;
+        while (this.readers.length > 0) this.readers.shift()(null);
+        while (this.writers.length > 0) this.writers.shift().reject(error);
+    }
+}
+
+const downloadQueue = new DownloadQueue();
+const metadataSemaphore = new MetadataSemaphore();
 
 // set up the express app
 const app = express();
 
-// trust reverse proxy headers like nginx
-app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.set('trust proxy', TRUST_PROXY_HOPS);
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            baseUri: ["'self'"],
+            connectSrc: ["'self'"],
+            fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+            formAction: ["'self'"],
+            frameAncestors: ["'none'"],
+            imgSrc: ["'self'", 'data:'],
+            objectSrc: ["'none'"],
+            scriptSrc: ["'self'"],
+            styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+            upgradeInsecureRequests: null
+        }
+    }
+}));
 
-app.use(cors({ exposedHeaders: ['Content-Disposition'] }));
-app.use(express.json());
+function createRateLimiter(limit, message) {
+    return rateLimit({
+        windowMs: RATE_LIMIT_WINDOW_MS,
+        limit,
+        standardHeaders: 'draft-8',
+        legacyHeaders: false,
+        handler: (req, res) => res.status(429).json({ error: message })
+    });
+}
 
-// serve static files from the public folder
-const PUBLIC_DIR = path.join(__dirname, 'public');
-app.use(express.static(PUBLIC_DIR));
-
-// rate limiter so people cannot spam the api
-const limiter = rateLimit({
-    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
-    max: parseInt(process.env.RATE_LIMIT_MAX, 10) || 120,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: 'Too many requests. Please wait a moment and try again.' }
+app.use('/api', (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
 });
-app.use('/api/', limiter);
+app.use('/api', createRateLimiter(API_RATE_LIMIT_MAX, 'Too many requests. Please wait before trying again.'));
 
-// check if the link is a supported youtube or spotify url
+function rejectCrossSiteRequests(req, res, next) {
+    if (String(req.get('sec-fetch-site') || '').toLowerCase() === 'cross-site') {
+        return res.status(403).json({ error: 'Cross-site requests are not allowed.' });
+    }
+
+    const origin = req.get('origin');
+    const requestHost = req.get('host');
+    if (origin && requestHost) {
+        try {
+            const originUrl = new URL(origin);
+            const hostUrl = new URL(`http://${requestHost}`);
+            if (originUrl.hostname.toLowerCase() !== hostUrl.hostname.toLowerCase()) {
+                return res.status(403).json({ error: 'Cross-site requests are not allowed.' });
+            }
+        } catch (e) {
+            // Ignore malformed origin or host headers and preserve non-browser client compatibility.
+        }
+    }
+    next();
+}
+
+// serve static files only after every API path has passed common protections
+const PUBLIC_DIR = path.join(__dirname, 'public');
+app.use(express.static(PUBLIC_DIR, { dotfiles: 'deny' }));
+
+const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be']);
+const SPOTIFY_HOSTS = new Set(['open.spotify.com']);
+
+// Only accept canonical provider links, never arbitrary hosts that merely contain a provider name.
 function isSafeUrl(urlString) {
+    if (typeof urlString !== 'string' || urlString.length === 0 || urlString.length > 2048) return false;
+
     try {
         const parsed = new URL(urlString);
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port) return false;
+
         const host = parsed.hostname.toLowerCase();
-        return host.includes('youtube.com') || host.includes('youtu.be') || host.includes('spotify.com');
+        if (YOUTUBE_HOSTS.has(host)) {
+            if (host === 'youtu.be') return /^\/[A-Za-z0-9_-]{11}\/?$/.test(parsed.pathname);
+            return /^\/(?:watch|playlist|shorts\/[A-Za-z0-9_-]{11}|embed\/[A-Za-z0-9_-]{11}|live\/[A-Za-z0-9_-]{11})\/?$/.test(parsed.pathname);
+        }
+
+        return SPOTIFY_HOSTS.has(host) && /^\/(?:track|album|playlist)\/[A-Za-z0-9]+\/?$/.test(parsed.pathname);
     } catch (e) {
         return false;
     }
 }
 
+function parseCoverUrl(urlString) {
+    if (typeof urlString !== 'string' || urlString.length === 0 || urlString.length > 2048) return null;
+    try {
+        const parsed = new URL(urlString);
+        const host = parsed.hostname.toLowerCase();
+        const allowed = ['ytimg.com', 'spotifycdn.com', 'scdn.co']
+            .some(domain => host === domain || host.endsWith(`.${domain}`));
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || !allowed) return null;
+        return parsed;
+    } catch (e) {
+        return null;
+    }
+}
+
+function spotifyLinkDetails(urlString) {
+    if (!isSafeUrl(urlString)) return null;
+    const parsed = new URL(urlString);
+    const match = parsed.pathname.match(/^\/(track|album|playlist)\/([A-Za-z0-9]+)\/?$/);
+    return match ? { type: match[1], id: match[2] } : null;
+}
+
+function safeMetadataText(value, fallback = '') {
+    const text = typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+    return text.replace(/[\x00-\x1F\x7F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200) || fallback;
+}
+
 // clean up filenames so they do not break the filesystem
 function sanitizeFilename(name) {
-    if (!name) return 'audio_track';
-    return name.replace(/<[^>]*>|&nbsp;|&[a-z]+;|[\$`'";|&]|\.\.[/\\]|[\x00-\x1F\x7F]/g, '')
-               .replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
-               .replace(/^\.+/, '')
-               .replace(/\s+/g, ' ')
-               .trim() || 'audio_track';
+    if (typeof name !== 'string' || !name) return 'audio_track';
+    return name.slice(0, 240).replace(/<[^>]*>|&nbsp;|&[a-z]+;|[\$`'";|&]|\.\.[/\\]|[\x00-\x1F\x7F]/g, '')
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
+        .replace(/^\.+/, '')
+        .replace(/\s+/g, ' ')
+        .trim().slice(0, 120) || 'audio_track';
 }
 
 function sanitizeAsciiHeader(name) {
-    const ascii = name.replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, ' ').trim();
+    const ascii = String(name || '').replace(/[^\x20-\x7E]/g, '').replace(/["\\;]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180);
     return ascii || 'download';
 }
 
@@ -158,21 +430,39 @@ function cleanupFiles(files) {
 
 // grab the 11 character id from a youtube link
 function getYouTubeVideoId(url) {
-    const regex = /(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/;
-    const match = url.match(regex);
-    return match ? match[1] : null;
+    try {
+        const parsed = new URL(url);
+        const host = parsed.hostname.toLowerCase();
+        let id = null;
+        if (host === 'youtu.be') id = parsed.pathname.slice(1);
+        else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
+        else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
+        return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
+    } catch (e) {
+        return null;
+    }
 }
 
 function isYouTubeUrl(url) {
-    return url.includes('youtube.com/watch') || url.includes('youtu.be/') || url.includes('youtube.com/shorts/') || url.includes('music.youtube.com/');
+    try {
+        const parsed = new URL(url);
+        return YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase());
+    } catch (e) {
+        return false;
+    }
 }
 
 function isYouTubePlaylist(url) {
-    return url.includes('youtube.com/playlist') || (url.includes('youtube.com/watch') && url.includes('list='));
+    try {
+        const parsed = new URL(url);
+        return YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase()) && (parsed.pathname === '/playlist' || parsed.searchParams.has('list'));
+    } catch (e) {
+        return false;
+    }
 }
 
 // fetch youtube video info using oembed first
-async function getYoutubeInfo(url) {
+async function getYoutubeInfo(url, signal) {
     const videoId = getYouTubeVideoId(url);
     const thumbnail = videoId ? `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` : '';
     let title = 'Unknown Title';
@@ -183,11 +473,14 @@ async function getYoutubeInfo(url) {
             const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
             const response = await axios.get(oembedUrl, {
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-                timeout: 5000
+                timeout: 5000,
+                maxRedirects: 0,
+                maxContentLength: 1024 * 1024,
+                signal
             });
             if (response.status === 200 && response.data) {
-                title = response.data.title || title;
-                author = response.data.author_name || author;
+                title = safeMetadataText(response.data.title, title);
+                author = safeMetadataText(response.data.author_name, author);
             }
         } catch (error) {
             Logger.warn(`YouTube oEmbed warning for ${videoId}: ${error.message}`);
@@ -197,14 +490,15 @@ async function getYoutubeInfo(url) {
 }
 
 // list all songs in a youtube playlist without downloading them yet
-async function getYoutubePlaylistData(url) {
+async function getYoutubePlaylistData(url, signal) {
     return new Promise((resolve, reject) => {
         const ytdlpArgs = [
             '--flat-playlist',
             '--print', '%(playlist_title)s:::%(id)s:::%(title)s:::%(uploader)s',
             '--ignore-errors',
             '--no-abort-on-error',
-            '--no-warnings'
+            '--no-warnings',
+            '--playlist-end', String(MAX_PLAYLIST_TRACKS)
         ];
 
         if (COOKIES_PATH) {
@@ -215,18 +509,37 @@ async function getYoutubePlaylistData(url) {
 
         const ytdlp = spawn('yt-dlp', ytdlpArgs);
         let output = '';
+        let timedOut = false;
 
         const timeout = setTimeout(() => {
-            ytdlp.kill();
-            reject(new Error('Playlist metadata fetch timed out after 30 seconds.'));
+            timedOut = true;
+            ytdlp.kill('SIGKILL');
         }, 30000);
+        const onAbort = () => ytdlp.kill('SIGKILL');
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener('abort', onAbort, { once: true });
 
-        ytdlp.stdout.on('data', (data) => output += data.toString());
+        let outputBytes = 0;
+        ytdlp.stdout.on('data', (data) => {
+            outputBytes += data.length;
+            if (outputBytes > MAX_PLAYLIST_OUTPUT_BYTES) {
+                ytdlp.kill('SIGKILL');
+                return;
+            }
+            output += data.toString();
+        });
         ytdlp.stderr.on('data', (data) => Logger.warn(`yt-dlp playlist stderr: ${data.toString().trim()}`));
 
         ytdlp.on('close', (code) => {
             clearTimeout(timeout);
-            if (code === 0 || output.length > 0) {
+            signal?.removeEventListener('abort', onAbort);
+            if (signal?.aborted) {
+                reject(new Error('Request cancelled.'));
+            } else if (timedOut) {
+                reject(new Error('Playlist metadata fetch timed out.'));
+            } else if (outputBytes > MAX_PLAYLIST_OUTPUT_BYTES) {
+                reject(new Error('Playlist metadata exceeds the allowed size.'));
+            } else if (code === 0 || output.length > 0) {
                 const lines = output.trim().split('\n').filter(Boolean);
                 let playlistName = 'YouTube Playlist';
 
@@ -236,14 +549,14 @@ async function getYoutubePlaylistData(url) {
                     const id = parts[1];
 
                     if (index === 0 && pName && pName !== 'NA') {
-                        playlistName = pName;
+                        playlistName = safeMetadataText(pName, playlistName);
                     }
 
-                    if (!id || id === 'NA' || id.length < 11) return null;
+                    if (!/^[A-Za-z0-9_-]{11}$/.test(id || '')) return null;
 
                     return {
-                        title: parts[2] || 'Unknown Track',
-                        artist: parts[3] || 'Unknown Artist',
+                        title: safeMetadataText(parts[2], 'Unknown Track'),
+                        artist: safeMetadataText(parts[3], 'Unknown Artist'),
                         thumbnail: `https://i.ytimg.com/vi/${id}/mqdefault.jpg`,
                         url: `https://www.youtube.com/watch?v=${id}`
                     };
@@ -261,18 +574,18 @@ async function getYoutubePlaylistData(url) {
 
         ytdlp.on('error', (err) => {
             clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
             reject(err);
         });
     });
 }
 
 // grab song or playlist info by reading the spotify embed page
-async function getSpotifyData(url) {
-    const match = url.match(/spotify\.com\/(track|album|playlist)\/([a-zA-Z0-9]+)/);
-    if (!match) throw new Error('Invalid Spotify link.');
+async function getSpotifyData(url, signal) {
+    const link = spotifyLinkDetails(url);
+    if (!link) throw new Error('Invalid Spotify link.');
 
-    const type = match[1];
-    const id = match[2];
+    const { type, id } = link;
 
     let coverImage = '';
     let collectionName = 'Spotify Collection';
@@ -281,11 +594,14 @@ async function getSpotifyData(url) {
         const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(url)}&format=json`;
         const oembedRes = await axios.get(oembedUrl, {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            timeout: 5000
+            timeout: 5000,
+            maxRedirects: 0,
+            maxContentLength: 1024 * 1024,
+            signal
         });
         if (oembedRes.status === 200 && oembedRes.data) {
-            coverImage = oembedRes.data.thumbnail_url || '';
-            collectionName = oembedRes.data.title || collectionName;
+            coverImage = parseCoverUrl(oembedRes.data.thumbnail_url)?.href || '';
+            collectionName = safeMetadataText(oembedRes.data.title, collectionName);
         }
     } catch (e) {
         Logger.warn(`Spotify oEmbed note: ${e.message}`);
@@ -297,7 +613,10 @@ async function getSpotifyData(url) {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9'
         },
-        timeout: 10000
+        timeout: 10000,
+        maxRedirects: 0,
+        maxContentLength: 5 * 1024 * 1024,
+        signal
     });
 
     const html = response.data;
@@ -331,19 +650,19 @@ async function getSpotifyData(url) {
                     ? entity.artists.map(a => a.name).join(', ')
                     : 'Unknown Artist';
                 tracks.push({
-                    title: entity?.name || 'Unknown Track',
-                    artist: artistName,
+                    title: safeMetadataText(entity?.name, 'Unknown Track'),
+                    artist: safeMetadataText(artistName, 'Unknown Artist'),
                     thumbnail: coverImage
                 });
             } else {
-                const rawTracks = findTracks(data);
+                const rawTracks = findTracks(data)?.slice(0, MAX_PLAYLIST_TRACKS);
                 if (rawTracks && rawTracks.length > 0) {
                     rawTracks.forEach(t => {
                         const trackData = t.track || t;
-                        const title = trackData.title || trackData.name || 'Unknown Track';
+                        const title = safeMetadataText(trackData.title || trackData.name, 'Unknown Track');
                         let trackArtists = 'Unknown Artist';
                         if (trackData.artists && Array.isArray(trackData.artists)) {
-                            trackArtists = trackData.artists.map(a => (typeof a === 'string' ? a : a.name)).join(', ');
+                            trackArtists = safeMetadataText(trackData.artists.map(a => (typeof a === 'string' ? a : a.name)).join(', '), 'Unknown Artist');
                         }
                         tracks.push({ title, artist: trackArtists, thumbnail: coverImage });
                     });
@@ -362,7 +681,7 @@ async function getSpotifyData(url) {
 
         let parsedTitle = titleMatch ? titleMatch[1] : 'Unknown Track';
         let parsedArtist = descMatch ? descMatch[1] : 'Unknown Artist';
-        if (imageMatch && !coverImage) coverImage = imageMatch[1];
+        if (imageMatch && !coverImage) coverImage = parseCoverUrl(imageMatch[1])?.href || '';
 
         // spotify titles usually look like Title · Artist
         if (parsedTitle.includes(' · ')) {
@@ -372,8 +691,8 @@ async function getSpotifyData(url) {
         }
 
         tracks.push({
-            title: parsedTitle.replace(/ - song and lyrics by.*$/i, '').trim(),
-            artist: parsedArtist.replace(/Listen to.*on Spotify.*$/i, '').trim(),
+            title: safeMetadataText(parsedTitle.replace(/ - song and lyrics by.*$/i, ''), 'Unknown Track'),
+            artist: safeMetadataText(parsedArtist.replace(/Listen to.*on Spotify.*$/i, ''), 'Unknown Artist'),
             thumbnail: coverImage
         });
     }
@@ -386,16 +705,23 @@ async function getSpotifyData(url) {
 }
 
 // download the raw audio stream to a temp file using yt-dlp
-async function downloadToTemp(targetUrl, extension = 'webm') {
-    const tempPath = path.join(os.tmpdir(), `ripcord_${Date.now()}_${Math.random().toString(36).substring(7)}.${extension}`);
+async function downloadToTemp(targetUrl, extension = 'webm', signal, targetFormat) {
+    const tempPath = path.join(WORK_DIR, `ripcord_${randomUUID()}.${extension}`);
 
     return new Promise((resolve, reject) => {
+        const formatSelector = targetFormat === 'ogg'
+            ? 'bestaudio[acodec=opus]/bestaudio/best'
+            : targetFormat === 'm4a' ? 'bestaudio[acodec=aac]/bestaudio/best' : 'bestaudio/best';
         const ytdlpArgs = [
-            '-f', 'bestaudio/best',
+            '-f', formatSelector,
             '--no-playlist',
             '--no-warnings',
+            '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
+            '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
             '--extractor-args', 'youtube:player_client=android,web'
         ];
+
+        if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
 
         if (COOKIES_PATH) {
             ytdlpArgs.push('--cookies', COOKIES_PATH);
@@ -404,26 +730,107 @@ async function downloadToTemp(targetUrl, extension = 'webm') {
         ytdlpArgs.push('-o', tempPath, '--', targetUrl);
 
         const ytdlp = spawn('yt-dlp', ytdlpArgs);
+        let timedOut = false;
 
         const timeout = setTimeout(() => {
-            ytdlp.kill();
-            reject(new Error('Download timed out after 90 seconds.'));
+            timedOut = true;
+            ytdlp.kill('SIGKILL');
         }, 90000);
+        const onAbort = () => ytdlp.kill('SIGKILL');
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener('abort', onAbort, { once: true });
 
         ytdlp.stderr.on('data', (data) => Logger.warn(`yt-dlp: ${data.toString().trim()}`));
 
         ytdlp.on('close', (code) => {
             clearTimeout(timeout);
-            if (code === 0 && fs.existsSync(tempPath)) {
+            signal?.removeEventListener('abort', onAbort);
+            if (signal?.aborted) {
+                cleanupFiles([tempPath]);
+                reject(new Error('Request cancelled.'));
+            } else if (timedOut) {
+                cleanupFiles([tempPath]);
+                reject(new Error('Audio download timed out.'));
+            } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
                 resolve(tempPath);
             } else {
+                cleanupFiles([tempPath]);
                 reject(new Error('yt-dlp was unable to extract this audio source.'));
             }
         });
 
         ytdlp.on('error', (err) => {
             clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
+            cleanupFiles([tempPath]);
             reject(err);
+        });
+    });
+}
+
+function runFfmpeg(args, timeoutMessage, signal) {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) return reject(new Error('Request cancelled.'));
+
+        const ff = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+        let timedOut = false;
+        let stderr = '';
+        const timeout = setTimeout(() => {
+            timedOut = true;
+            ff.kill('SIGKILL');
+        }, 60000);
+        const onAbort = () => ff.kill('SIGKILL');
+        signal?.addEventListener('abort', onAbort, { once: true });
+        ff.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-4000); });
+        ff.on('error', error => {
+            clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
+            reject(error);
+        });
+        ff.on('close', code => {
+            clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
+            if (signal?.aborted) reject(new Error('Request cancelled.'));
+            else if (timedOut) reject(new Error(timeoutMessage));
+            else if (code !== 0) reject(new Error(stderr.trim().slice(-1000) || 'FFmpeg encoding failed.'));
+            else resolve();
+        });
+    });
+}
+
+function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, title, artist, maxBytes, copyAudio = false) {
+    const args = ['-y', '-i', audioPath];
+    const embedsCover = coverPath && ['mp3', 'm4a'].includes(format);
+    if (embedsCover) args.push('-i', coverPath);
+    args.push('-map', '0:a:0');
+    if (embedsCover) args.push('-map', '1:v:0');
+
+    if (copyAudio) args.push('-c:a', 'copy');
+    else if (format === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', `${bitrate}k`);
+    else if (format === 'm4a') args.push('-c:a', 'aac', '-b:a', `${bitrate}k`);
+    else if (format === 'ogg') args.push('-c:a', 'libvorbis', '-b:a', `${bitrate}k`);
+    else if (format === 'wav') args.push('-c:a', 'pcm_s16le');
+    else if (format === 'flac') args.push('-c:a', 'flac', '-compression_level', '0');
+
+    if (title) args.push('-metadata', `title=${title}`);
+    if (artist) args.push('-metadata', `artist=${artist}`);
+    if (embedsCover) {
+        args.push('-c:v', 'mjpeg');
+        if (format === 'mp3') {
+            args.push('-id3v2_version', '3', '-metadata:s:v', 'title=Album cover');
+        }
+        args.push('-disposition:v', 'attached_pic');
+    }
+    args.push('-fs', String(maxBytes), outputPath);
+    return args;
+}
+
+function probeAudioCodec(filePath) {
+    return new Promise(resolve => {
+        ffmpeg.ffprobe(filePath, (error, metadata) => {
+            if (error) return resolve(null);
+            const audioStream = metadata?.streams?.find(stream => stream.codec_type === 'audio');
+            resolve(audioStream?.codec_name || null);
         });
     });
 }
@@ -451,27 +858,29 @@ function injectVorbisCoverArt(filePath, imgPath, format) {
             const block = Buffer.concat([picType, mimeLen, mimeBuf, descLen, descBuf, width, height, depth, colors, imgLen, imgBuffer]);
             const base64Block = block.toString('base64');
 
-            const readResult = spawnSync('vorbiscomment', ['-l', '-R', filePath]);
+            const readResult = spawnSync('vorbiscomment', ['-l', '-R', filePath], { timeout: 15000, windowsHide: true });
             if (readResult.error || readResult.status !== 0) return false;
 
             let comments = readResult.stdout.toString().split('\n');
             comments = comments.filter(c => c && !c.startsWith('metadata_block_picture='));
             comments.push(`metadata_block_picture=${base64Block}`);
 
-            const tempCommentsFile = path.join(os.tmpdir(), `comments_${Date.now()}.txt`);
+            const tempCommentsFile = path.join(WORK_DIR, `comments_${randomUUID()}.txt`);
             fs.writeFileSync(tempCommentsFile, comments.join('\n'));
-            const writeResult = spawnSync('vorbiscomment', ['-w', '-R', '-c', tempCommentsFile, filePath]);
-            fs.unlinkSync(tempCommentsFile);
-
-            return !writeResult.error && writeResult.status === 0;
+            try {
+                const writeResult = spawnSync('vorbiscomment', ['-w', '-R', '-c', tempCommentsFile, filePath], { timeout: 15000, windowsHide: true });
+                return !writeResult.error && writeResult.status === 0;
+            } finally {
+                cleanupFiles([tempCommentsFile]);
+            }
         } catch (e) {
             return false;
         }
     } else if (format === 'flac') {
         try {
-            spawnSync('metaflac', ['--remove', '--block-type=PICTURE', '--except-block-type=STREAMINFO', filePath]);
+            spawnSync('metaflac', ['--remove', '--block-type=PICTURE', '--except-block-type=STREAMINFO', filePath], { timeout: 15000, windowsHide: true });
             const spec = `3||Front Cover||${imgPath}`;
-            const writeResult = spawnSync('metaflac', [`--import-picture-from=${spec}`, filePath]);
+            const writeResult = spawnSync('metaflac', [`--import-picture-from=${spec}`, filePath], { timeout: 15000, windowsHide: true });
             return !writeResult.error && writeResult.status === 0;
         } catch (e) {
             return false;
@@ -481,7 +890,7 @@ function injectVorbisCoverArt(filePath, imgPath, format) {
 }
 
 // transcode the audio with ffmpeg and stream it directly to the user
-async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '') {
+async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '', signal) {
     const tempFiles = [];
 
     // clean up temp files if the user closes their browser or cancels
@@ -489,20 +898,24 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
     res.on('close', onDisconnect);
 
     try {
-        Logger.info(`Downloading audio stream for: ${target}`);
-        const tempAudioPath = await downloadToTemp(target, 'webm');
+        Logger.info('Downloading validated audio source');
+        const tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format);
         tempFiles.push(tempAudioPath);
 
         let tempImgPath = '';
-        if (thumbnailUrl) {
+        const safeThumbnail = parseCoverUrl(thumbnailUrl);
+        if (safeThumbnail) {
             try {
-                const imgRes = await axios.get(thumbnailUrl, {
+                const imgRes = await axios.get(safeThumbnail.href, {
                     responseType: 'arraybuffer',
                     headers: { 'User-Agent': 'Mozilla/5.0' },
-                    timeout: 6000
+                    timeout: 6000,
+                    maxRedirects: 0,
+                    maxContentLength: MAX_COVER_BYTES,
+                    signal
                 });
-                if (imgRes.status === 200) {
-                    tempImgPath = path.join(os.tmpdir(), `cover_${Date.now()}.jpg`);
+                if (imgRes.status === 200 && String(imgRes.headers['content-type'] || '').toLowerCase().startsWith('image/jpeg')) {
+                    tempImgPath = path.join(WORK_DIR, `cover_${randomUUID()}.img`);
                     fs.writeFileSync(tempImgPath, Buffer.from(imgRes.data));
                     tempFiles.push(tempImgPath);
                 }
@@ -511,90 +924,31 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
             }
         }
 
-        const tempOutPath = path.join(os.tmpdir(), `out_${Date.now()}.${format}`);
+        const tempOutPath = path.join(WORK_DIR, `out_${randomUUID()}.${format}`);
         tempFiles.push(tempOutPath);
 
-        const ffmpegFormatMap = { mp3: 'mp3', m4a: 'ipod', ogg: 'ogg', wav: 'wav', flac: 'flac' };
-        const ffmpegFormat = ffmpegFormatMap[format] || 'mp3';
+        const sourceCodec = await probeAudioCodec(tempAudioPath);
+        const copyAudio = (format === 'ogg' && sourceCodec === 'opus') || (format === 'm4a' && sourceCodec === 'aac');
+        Logger.info(copyAudio
+            ? `Remuxing ${sourceCodec} audio into [${format.toUpperCase()}]`
+            : `Encoding audio to [${format.toUpperCase()}] at ${bitrate} kbps`);
+        const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, format, bitrate, tempImgPath, filename || 'Track', artist || 'Unknown Artist', MAX_AUDIO_OUTPUT_BYTES, copyAudio);
+        await runFfmpeg(args, 'Audio encoding timed out.', signal);
+        if (signal?.aborted) throw new Error('Request cancelled.');
+        if (fs.statSync(tempOutPath).size >= MAX_AUDIO_OUTPUT_BYTES) throw new Error('Audio output exceeds the allowed size.');
 
-        Logger.info(`Encoding audio to [${format.toUpperCase()}] at ${bitrate} kbps`);
-        await new Promise((resolve, reject) => {
-            const ff = ffmpeg(tempAudioPath);
-            const opts = ['-map', '0:a:0'];
-
-            if (format === 'mp3') opts.push('-c:a', 'libmp3lame');
-            else if (format === 'm4a') opts.push('-c:a', 'aac');
-            else if (format === 'ogg') opts.push('-c:a', 'libvorbis');
-            else if (format === 'wav') opts.push('-c:a', 'pcm_s16le');
-            else if (format === 'flac') opts.push('-c:a', 'flac');
-
-            const ffTimeout = setTimeout(() => {
-                ff.kill('SIGKILL');
-                reject(new Error('Audio encoding timed out.'));
-            }, 60000);
-
-            ff.outputOptions(opts)
-              .audioBitrate(bitrate)
-              .format(ffmpegFormat)
-              .save(tempOutPath)
-              .on('error', (err) => { clearTimeout(ffTimeout); reject(err); })
-              .on('end', () => { clearTimeout(ffTimeout); resolve(); });
-        });
-
-        // attach the cover image to the converted audio
-        if (tempImgPath && fs.existsSync(tempOutPath)) {
-            if (format === 'm4a' || format === 'wav') {
-                const taggedPath = path.join(os.tmpdir(), `tagged_${Date.now()}.${format}`);
-                tempFiles.push(taggedPath);
-                try {
-                    let cmd = '';
-                    if (format === 'wav') {
-                        cmd = `ffmpeg -y -i "${tempOutPath}" -i "${tempImgPath}" -map 0:a -map 1:v -c:a copy -c:v mjpeg -id3v2_version 3 -metadata:s:v title="Album cover" "${taggedPath}"`;
-                    } else if (format === 'm4a') {
-                        cmd = `ffmpeg -y -i "${tempOutPath}" -i "${tempImgPath}" -map 0:a -map 1:v -c:a copy -c:v mjpeg -disposition:v attached_pic "${taggedPath}"`;
-                    }
-                    if (cmd) {
-                        execSync(cmd, { stdio: 'ignore' });
-                        if (fs.existsSync(taggedPath)) {
-                            fs.copyFileSync(taggedPath, tempOutPath);
-                        }
-                    }
-                } catch (e) {
-                    Logger.warn(`Tagging command omitted: ${e.message}`);
-                }
-            } else if (format === 'ogg' || format === 'flac') {
-                injectVorbisCoverArt(tempOutPath, tempImgPath, format);
-            }
-        }
-
-        // add id3 tags and cover art for mp3 files
-        if (format === 'mp3' && fs.existsSync(tempOutPath)) {
-            try {
-                const tags = {
-                    title: filename || 'Track',
-                    artist: artist || 'Unknown Artist'
-                };
-                if (tempImgPath && fs.existsSync(tempImgPath)) {
-                    tags.image = {
-                        mime: 'image/jpeg',
-                        type: { id: 3, name: 'front cover' },
-                        description: 'Cover Art',
-                        imageBuffer: fs.readFileSync(tempImgPath)
-                    };
-                }
-                const updatedBuffer = NodeID3.write(tags, fs.readFileSync(tempOutPath));
-                fs.writeFileSync(tempOutPath, updatedBuffer);
-            } catch (metaErr) {
-                Logger.warn(`ID3 tag injection error: ${metaErr.message}`);
-            }
+        if (tempImgPath && fs.existsSync(tempOutPath) && (format === 'ogg' || format === 'flac')) {
+            injectVorbisCoverArt(tempOutPath, tempImgPath, format);
         }
 
         Logger.success(`Encoding complete. Streaming ${format.toUpperCase()} to client`);
         const fileStat = fs.statSync(tempOutPath);
+        if (fileStat.size > MAX_AUDIO_OUTPUT_BYTES) throw new Error('Audio output exceeds the allowed size.');
         res.setHeader('Content-Length', fileStat.size);
 
         const readStream = fs.createReadStream(tempOutPath);
         readStream.pipe(res);
+        readStream.on('error', () => res.destroy());
 
         readStream.on('end', () => {
             res.removeListener('close', onDisconnect);
@@ -606,106 +960,104 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
         res.removeListener('close', onDisconnect);
         cleanupFiles(tempFiles);
         if (!res.headersSent) {
-            res.status(500).json({ error: error.message || 'Failed to process audio.' });
-        }
+            res.status(502).json({ error: 'Unable to process this audio request.' });
+        } else res.destroy();
     }
 }
 
-// convert one song so we can add it to the zip file
-async function processPlaylistTrack(track, index, audioBitrate, audioFormat, ffmpegFormat) {
+async function downloadPlaylistTrack(track, index, audioFormat, signal) {
     const tempFiles = [];
 
     try {
-        Logger.info(`[Track ${index + 1}] Processing: ${track.title} - ${track.artist}`);
+        const title = String(track.title || 'Unknown Track').slice(0, 200);
+        const artist = String(track.artist || 'Unknown Artist').slice(0, 200);
+        Logger.info(`[Track ${index + 1}] Downloading: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
 
         let downloadTarget;
         if (track.url) {
+            if (!isSafeUrl(track.url)) throw new Error('Invalid playlist track URL.');
             downloadTarget = track.url;
         } else {
-            const cleanArtist = track.artist.replace(/,/g, ' ');
-            downloadTarget = `ytsearch1:${track.title} ${cleanArtist}`;
+            const cleanArtist = artist.replace(/,/g, ' ');
+            downloadTarget = `ytsearch1:${title} ${cleanArtist}`;
         }
 
-        const downloadPromises = [downloadToTemp(downloadTarget, 'webm')];
+        const downloadPromise = downloadToTemp(downloadTarget, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat);
         let tempImgPath = '';
+        const safeThumbnail = parseCoverUrl(track.thumbnail);
 
-        if (track.thumbnail) {
-            downloadPromises.push(
-                axios.get(track.thumbnail, { responseType: 'arraybuffer', headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 6000 })
-                    .then(imgRes => {
-                        if (imgRes.status === 200) {
-                            tempImgPath = path.join(os.tmpdir(), `cover_zip_${Date.now()}_${index}.jpg`);
-                            fs.writeFileSync(tempImgPath, Buffer.from(imgRes.data));
-                            tempFiles.push(tempImgPath);
-                        }
-                    }).catch(() => {})
-            );
-        }
+        const coverPromise = safeThumbnail
+            ? axios.get(safeThumbnail.href, {
+                responseType: 'arraybuffer',
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                timeout: 6000,
+                maxRedirects: 0,
+                maxContentLength: MAX_COVER_BYTES,
+                signal
+            })
+                .then(imgRes => {
+                    if (imgRes.status === 200 && String(imgRes.headers['content-type'] || '').toLowerCase().startsWith('image/jpeg')) {
+                        tempImgPath = path.join(WORK_DIR, `cover_zip_${randomUUID()}.img`);
+                        fs.writeFileSync(tempImgPath, Buffer.from(imgRes.data));
+                        tempFiles.push(tempImgPath);
+                    }
+                }).catch(() => { })
+            : Promise.resolve();
 
-        const results = await Promise.all(downloadPromises);
-        const tempAudioPath = results[0];
+        const [tempAudioPath] = await Promise.all([downloadPromise, coverPromise]);
         tempFiles.push(tempAudioPath);
+        return { track, index, title, artist, tempAudioPath, tempImgPath };
+    } catch (err) {
+        Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - ${err.message}`);
+        cleanupFiles(tempFiles);
+        return null;
+    }
+}
 
-        const tempOutPath = path.join(os.tmpdir(), `track_${Date.now()}_${index}.${audioFormat}`);
+// convert one downloaded song so it can be added to the zip file
+async function processPlaylistTrack(source, audioBitrate, audioFormat, signal) {
+    const { track, index, title, artist, tempAudioPath, tempImgPath } = source;
+    const tempFiles = [tempAudioPath, tempImgPath].filter(Boolean);
+
+    try {
+        Logger.info(`[Track ${index + 1}] Encoding: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
+        const tempOutPath = path.join(WORK_DIR, `track_${randomUUID()}.${audioFormat}`);
         tempFiles.push(tempOutPath);
 
-        await new Promise((resolve, reject) => {
-            const ff = ffmpeg(tempAudioPath);
-            const outOpts = ['-map', '0:a:0'];
+        const sourceCodec = await probeAudioCodec(tempAudioPath);
+        const copyAudio = (audioFormat === 'ogg' && sourceCodec === 'opus') || (audioFormat === 'm4a' && sourceCodec === 'aac');
+        Logger.info(copyAudio
+            ? `[Track ${index + 1}] Remuxing ${sourceCodec} audio into [${audioFormat.toUpperCase()}]`
+            : `[Track ${index + 1}] Encoding audio to [${audioFormat.toUpperCase()}] at ${audioBitrate} kbps`);
+        const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, MAX_ZIP_TRACK_BYTES, copyAudio);
+        await runFfmpeg(args, 'Track encoding timed out.', signal);
+        if (signal?.aborted) throw new Error('Request cancelled.');
+        if (fs.statSync(tempOutPath).size >= MAX_ZIP_TRACK_BYTES) throw new Error('Playlist track exceeds the allowed size.');
 
-            if (audioFormat === 'mp3') outOpts.push('-c:a', 'libmp3lame');
-            else if (audioFormat === 'm4a') outOpts.push('-c:a', 'aac');
-            else if (audioFormat === 'ogg') outOpts.push('-c:a', 'libvorbis');
-            else if (audioFormat === 'wav') outOpts.push('-c:a', 'pcm_s16le');
-            else if (audioFormat === 'flac') outOpts.push('-c:a', 'flac');
-
-            const ffTimeout = setTimeout(() => {
-                ff.kill('SIGKILL');
-                reject(new Error('Track encoding timed out.'));
-            }, 60000);
-
-            ff.outputOptions(outOpts)
-              .audioBitrate(audioBitrate)
-              .format(ffmpegFormat)
-              .save(tempOutPath)
-              .on('error', (err) => { clearTimeout(ffTimeout); reject(err); })
-              .on('end', () => { clearTimeout(ffTimeout); resolve(); });
-        });
-
-        // tag each mp3 in the playlist with cover art and metadata
-        if (tempImgPath && fs.existsSync(tempOutPath)) {
-            if (audioFormat === 'mp3') {
-                try {
-                    const tags = { title: track.title, artist: track.artist };
-                    tags.image = {
-                        mime: 'image/jpeg',
-                        type: { id: 3, name: 'front cover' },
-                        description: 'Cover Art',
-                        imageBuffer: fs.readFileSync(tempImgPath)
-                    };
-                    const updated = NodeID3.write(tags, fs.readFileSync(tempOutPath));
-                    fs.writeFileSync(tempOutPath, updated);
-                } catch (e) {}
-            }
+        if (tempImgPath && fs.existsSync(tempOutPath) && (audioFormat === 'ogg' || audioFormat === 'flac')) {
+            injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
         }
 
-        const buffer = fs.readFileSync(tempOutPath);
-        const safeName = sanitizeFilename(`${String(index + 1).padStart(2, '0')} - ${track.title} - ${track.artist}.${audioFormat}`);
+        if (fs.statSync(tempOutPath).size > MAX_ZIP_TRACK_BYTES) throw new Error('Playlist track exceeds the allowed size.');
+        const safeName = sanitizeFilename(`${String(index + 1).padStart(2, '0')} - ${title} - ${artist}.${audioFormat}`);
 
-        cleanupFiles(tempFiles);
-        return { name: safeName, buffer };
+        cleanupFiles(tempFiles.filter(file => file !== tempOutPath));
+        return { name: safeName, filePath: tempOutPath };
 
     } catch (err) {
-        Logger.error(`[Track ${index + 1}] FAILED: ${track.title} - ${err.message}`);
+        Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - ${err.message}`);
         cleanupFiles(tempFiles);
         return null;
     }
 }
 
 // worker function that processes the actual download request
-async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res) {
+async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal) {
     try {
-        Logger.info(`Task started: ${url} (${audioFormat.toUpperCase()})`);
+        Logger.info(`Task started (${audioFormat.toUpperCase()})`);
+        if (signal.aborted) return;
+
+        const spotifyLink = spotifyLinkDetails(url);
 
         const mimeTypes = {
             mp3: 'audio/mpeg',
@@ -716,27 +1068,25 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
         };
         const mimeType = mimeTypes[audioFormat] || 'audio/mpeg';
         const asciiFilename = sanitizeAsciiHeader(safeFilename);
-        const ffmpegFormatMap = { mp3: 'mp3', m4a: 'ipod', ogg: 'ogg', wav: 'wav', flac: 'flac' };
-        const ffmpegFormat = ffmpegFormatMap[audioFormat] || 'mp3';
 
         // download a single youtube video
         if (isYouTubeUrl(url) && !isYouTubePlaylist(url)) {
             res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}.${audioFormat}"`);
             res.setHeader('Content-Type', mimeType);
-            const info = await getYoutubeInfo(url);
-            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, info.title, info.author);
+            const info = await getYoutubeInfo(url, signal);
+            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, info.title, info.author, signal);
             return;
         }
 
         // download a single spotify track
-        if (url.includes('spotify.com/track/')) {
+        if (spotifyLink?.type === 'track') {
             res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}.${audioFormat}"`);
             res.setHeader('Content-Type', mimeType);
-            const spotifyData = await getSpotifyData(url);
+            const spotifyData = await getSpotifyData(url, signal);
             const track = spotifyData.tracks[0];
             const cleanArtist = track.artist.replace(/,/g, ' ');
             const searchQuery = `ytsearch1:${track.title} ${cleanArtist}`;
-            await processAndStreamAudio(searchQuery, audioBitrate, audioFormat, track.thumbnail, res, track.title, track.artist);
+            await processAndStreamAudio(searchQuery, audioBitrate, audioFormat, track.thumbnail, res, track.title, track.artist, signal);
             return;
         }
 
@@ -744,10 +1094,10 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
         let collectionData = null;
         if (isYouTubePlaylist(url)) {
             Logger.info('Fetching YouTube playlist items');
-            collectionData = await getYoutubePlaylistData(url);
-        } else if (url.includes('spotify.com/album/') || url.includes('spotify.com/playlist/')) {
+            collectionData = await getYoutubePlaylistData(url, signal);
+        } else if (spotifyLink && spotifyLink.type !== 'track') {
             Logger.info('Fetching Spotify collection items');
-            collectionData = await getSpotifyData(url);
+            collectionData = await getSpotifyData(url, signal);
         }
 
         if (collectionData && collectionData.tracks && collectionData.tracks.length > 0) {
@@ -755,36 +1105,98 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
             res.setHeader('Content-Type', 'application/zip');
 
-            const archive = archiver('zip', { zlib: { level: 9 } });
+            const { ZipArchive } = await import('archiver');
+            const archive = new ZipArchive({ zlib: { level: 6 } });
             archive.pipe(res);
 
             archive.on('warning', (err) => Logger.warn(`ZIP archive warning: ${err.message}`));
+            const trackFilePaths = new Set();
+            const archiveFilePaths = new Map();
+            const cleanupTrackFiles = () => {
+                cleanupFiles([...trackFilePaths]);
+                trackFilePaths.clear();
+                archiveFilePaths.clear();
+            };
+            archive.on('entry', entry => {
+                const filePath = archiveFilePaths.get(entry.name);
+                if (filePath) {
+                    cleanupFiles([filePath]);
+                    trackFilePaths.delete(filePath);
+                    archiveFilePaths.delete(entry.name);
+                }
+            });
             archive.on('error', (err) => {
                 Logger.error(`ZIP archive error: ${err.message}`);
-                if (!res.headersSent) res.status(500).end();
+                cleanupTrackFiles();
+                if (!res.destroyed) res.destroy(err);
             });
+            const onAbort = () => {
+                try {
+                    archive.abort();
+                } finally {
+                    cleanupTrackFiles();
+                }
+            };
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
 
-            // convert songs a few at a time so we do not run out of memory
-            const batchSize = 3;
-            const tracks = collectionData.tracks;
+            const tracks = collectionData.tracks.slice(0, MAX_PLAYLIST_TRACKS);
+            let addedTracks = 0;
 
-            for (let i = 0; i < tracks.length; i += batchSize) {
-                const batch = tracks.slice(i, i + batchSize);
-                Logger.info(`Processing batch ${Math.floor(i / batchSize) + 1} of ${Math.ceil(tracks.length / batchSize)}`);
-
-                const results = await Promise.all(
-                    batch.map((track, j) => processPlaylistTrack(track, i + j, audioBitrate, audioFormat, ffmpegFormat))
-                );
-
-                results.forEach(result => {
-                    if (result && result.buffer) {
-                        archive.append(result.buffer, { name: result.name });
+            try {
+                const handoffQueue = new AsyncBoundedQueue(4);
+                const encodedResults = new Array(tracks.length);
+                let nextTrack = 0;
+                const downloadWorker = async () => {
+                    while (!signal.aborted) {
+                        const index = nextTrack++;
+                        if (index >= tracks.length) return;
+                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal);
+                        if (!downloaded) continue;
+                        try {
+                            await handoffQueue.push(downloaded);
+                        } catch {
+                            cleanupFiles([downloaded.tempAudioPath, downloaded.tempImgPath]);
+                            return;
+                        }
                     }
-                });
-            }
+                };
+                const encodeWorker = async () => {
+                    while (!signal.aborted) {
+                        const downloaded = await handoffQueue.shift();
+                        if (!downloaded) return;
+                        const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal);
+                        if (signal.aborted && result?.filePath) cleanupFiles([result.filePath]);
+                        else if (result) encodedResults[downloaded.index] = result;
+                    }
+                };
 
-            archive.finalize();
-            Logger.success(`Archive completed: ${zipName}`);
+                const encodeWorkers = Array.from({ length: ENCODE_CONCURRENCY }, () => encodeWorker());
+                const downloadWorkers = Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, tracks.length) }, () => downloadWorker());
+                await Promise.all(downloadWorkers);
+                handoffQueue.close();
+                await Promise.all(encodeWorkers);
+
+                for (const result of encodedResults) {
+                    if (!result?.filePath) continue;
+                    if (signal.aborted) {
+                        cleanupFiles([result.filePath]);
+                        continue;
+                    }
+                    trackFilePaths.add(result.filePath);
+                    archiveFilePaths.set(result.name, result.filePath);
+                    archive.file(result.filePath, { name: result.name });
+                    addedTracks++;
+                }
+
+                if (signal.aborted) throw new Error('Request cancelled.');
+                if (addedTracks === 0) throw new Error('No tracks could be processed.');
+                await archive.finalize();
+                Logger.success(`Archive completed: ${zipName}`);
+            } finally {
+                signal.removeEventListener('abort', onAbort);
+                cleanupTrackFiles();
+            }
             return;
         }
 
@@ -795,52 +1207,67 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
     } catch (error) {
         Logger.error(`Queue execution error: ${error.message}`);
         if (!res.headersSent) {
-            res.status(500).json({ error: error.message || 'Error occurred while processing download.' });
-        }
+            res.status(502).json({ error: 'Unable to complete this download request.' });
+        } else if (!res.destroyed) res.destroy();
     }
 }
 
 // health check route so uptime monitors know the server is running
 app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        app: 'Ripcord',
-        ytdlp: ytdlpAvailable ? ytdlpVersion : 'unavailable',
-        queue: {
-            running: downloadQueue.running,
-            pending: downloadQueue.queue.length
-        }
-    });
+    res.json({ status: 'ok' });
 });
 
 // inspect a link and return title, artist, and cover art
-app.get('/api/fetch-info', async (req, res) => {
+app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
     try {
-        const { url } = req.query;
-        if (!url || !isSafeUrl(url)) {
+        const rawUrl = req.query.url;
+        if (!isSafeUrl(rawUrl)) {
             return res.status(400).json({ error: 'Please enter a valid Spotify or YouTube URL.' });
         }
+        const parsedUrl = new URL(rawUrl);
+        parsedUrl.hash = '';
+        const url = parsedUrl.href;
+        const controller = new AbortController();
+        let metadataAcquisition = null;
+        res.once('close', () => {
+            if (!res.writableEnded) {
+                controller.abort();
+                metadataAcquisition?.cancel();
+            }
+        });
 
-        Logger.info(`Metadata requested for: ${url}`);
+        Logger.info(`Metadata requested from ${parsedUrl.hostname}`);
 
         if (isYouTubePlaylist(url)) {
-            const ytData = await getYoutubePlaylistData(url);
-            return res.json({
-                type: 'collection',
-                title: ytData.name,
-                trackCount: ytData.tracks.length,
-                thumbnail: ytData.tracks[0]?.thumbnail || ''
-            });
+            metadataAcquisition = metadataSemaphore.tryAcquire();
+            if (!metadataAcquisition) {
+                return res.status(503).json({ error: 'The metadata queue is full. Please try again shortly.' });
+            }
+            let release;
+            try {
+                release = await metadataAcquisition;
+                if (controller.signal.aborted) return;
+                const ytData = await getYoutubePlaylistData(url, controller.signal);
+                return res.json({
+                    type: 'collection',
+                    title: ytData.name,
+                    trackCount: ytData.tracks.length,
+                    thumbnail: ytData.tracks[0]?.thumbnail || ''
+                });
+            } finally {
+                release?.();
+                metadataAcquisition.cancel();
+            }
         } else if (isYouTubeUrl(url)) {
-            const info = await getYoutubeInfo(url);
+            const info = await getYoutubeInfo(url, controller.signal);
             return res.json({
                 type: 'track',
                 title: info.title,
                 artist: info.author,
                 thumbnail: info.thumbnail
             });
-        } else if (url.includes('spotify.com/track/')) {
-            const spotifyData = await getSpotifyData(url);
+        } else if (spotifyLinkDetails(url)?.type === 'track') {
+            const spotifyData = await getSpotifyData(url, controller.signal);
             const track = spotifyData.tracks[0];
             return res.json({
                 type: 'track',
@@ -848,8 +1275,8 @@ app.get('/api/fetch-info', async (req, res) => {
                 artist: track.artist,
                 thumbnail: track.thumbnail
             });
-        } else if (url.includes('spotify.com/album/') || url.includes('spotify.com/playlist/')) {
-            const spotifyData = await getSpotifyData(url);
+        } else if (spotifyLinkDetails(url)) {
+            const spotifyData = await getSpotifyData(url, controller.signal);
             return res.json({
                 type: 'collection',
                 title: spotifyData.name,
@@ -861,70 +1288,120 @@ app.get('/api/fetch-info', async (req, res) => {
         }
     } catch (error) {
         Logger.error(`Fetch info error: ${error.message}`);
-        res.status(500).json({ error: error.message || 'Failed to inspect link.' });
+        if (!res.destroyed && !res.headersSent) res.status(502).json({ error: 'Unable to inspect this media link.' });
     }
 });
 
 // api endpoint to start downloading the audio
-app.get('/api/download', (req, res) => {
-    const { url, bitrate, filename, format } = req.query;
-    const audioBitrate = parseInt(bitrate, 10) || 128;
-    const audioFormat = (format || 'mp3').toLowerCase();
-    const safeFilename = sanitizeFilename(filename);
+app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
+    const rawUrl = req.query.url;
+    const bitrate = req.query.bitrate;
+    const filename = req.query.filename;
+    const format = req.query.format;
+        const audioBitrate = bitrate === undefined
+            ? 128
+            : typeof bitrate === 'string' && /^\d{2,3}$/.test(bitrate) ? Number(bitrate) : NaN;
+    const audioFormat = format === undefined ? 'mp3' : format;
 
-    if (!url || !isSafeUrl(url)) {
+    if (!isSafeUrl(rawUrl)) {
         return res.status(400).json({ error: 'Invalid URL provided.' });
     }
+    if (typeof audioFormat !== 'string' || !['mp3', 'm4a', 'flac', 'wav', 'ogg'].includes(audioFormat)) {
+        return res.status(400).json({ error: 'Unsupported audio format.' });
+    }
+    if (typeof audioBitrate !== 'number' || ![128, 192, 320].includes(audioBitrate)) {
+        return res.status(400).json({ error: 'Unsupported audio bitrate.' });
+    }
+    if (filename !== undefined && (typeof filename !== 'string' || filename.length > 120)) {
+        return res.status(400).json({ error: 'Filename is invalid or too long.' });
+    }
 
-    downloadQueue.addTask(() => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res));
+    const parsedUrl = new URL(rawUrl);
+    parsedUrl.hash = '';
+    const safeFilename = sanitizeFilename(filename);
+
+    const accepted = downloadQueue.addTask(
+        signal => executeDownloadTask(parsedUrl.href, audioBitrate, audioFormat, safeFilename, res, signal),
+        res
+    );
+    if (!accepted) {
+        return res.status(503).json({ error: 'The download queue is full. Please try again shortly.' });
+    }
 });
 
 // image proxy so the frontend can read album cover pixels without cors errors
-const COVER_HOSTS = ['ytimg.com', 'spotifycdn.com', 'scdn.co'];
-
-app.get('/api/cover', async (req, res) => {
-    let target;
-    try {
-        target = new URL(String(req.query.url || ''));
-    } catch {
-        return res.status(400).json({ error: 'Invalid image URL.' });
-    }
-    const allowed = target.protocol === 'https:' &&
-        COVER_HOSTS.some(h => target.hostname === h || target.hostname.endsWith('.' + h));
-    if (!allowed) {
+app.get('/api/cover', rejectCrossSiteRequests, async (req, res) => {
+    const target = parseCoverUrl(req.query.url);
+    if (!target) {
         return res.status(400).json({ error: 'Image host not allowed.' });
     }
+
+    const controller = new AbortController();
+    res.once('close', () => { if (!res.writableEnded) controller.abort(); });
 
     try {
         const upstream = await axios.get(target.href, {
             responseType: 'stream',
             timeout: 6000,
             maxRedirects: 0,
-            maxContentLength: 5 * 1024 * 1024,
-            headers: { 'User-Agent': 'Mozilla/5.0' }
+            maxContentLength: MAX_COVER_BYTES,
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: controller.signal
         });
         const type = String(upstream.headers['content-type'] || '');
-        if (!type.startsWith('image/')) {
+        const contentLength = Number(upstream.headers['content-length']);
+        const contentType = type.split(';', 1)[0].trim().toLowerCase();
+        if (!['image/jpeg', 'image/png', 'image/webp'].includes(contentType)
+            || (Number.isFinite(contentLength) && contentLength > MAX_COVER_BYTES)) {
             upstream.data.destroy();
             return res.status(502).json({ error: 'Not an image.' });
         }
-        res.set('Content-Type', type);
+        let receivedBytes = 0;
+        const sizeLimit = new Transform({
+            transform(chunk, encoding, callback) {
+                receivedBytes += chunk.length;
+                if (receivedBytes > MAX_COVER_BYTES) callback(new Error('Cover image exceeds size limit.'));
+                else callback(null, chunk);
+            }
+        });
+        const streamError = () => {
+            upstream.data.destroy();
+            if (res.destroyed) return;
+            if (res.headersSent) res.destroy();
+            else res.status(502).json({ error: 'Could not load image.' });
+        };
+        upstream.data.on('error', streamError);
+        sizeLimit.on('error', streamError);
+        res.set('Content-Type', type.split(';', 1)[0]);
         res.set('Cache-Control', 'public, max-age=86400');
-        upstream.data.pipe(res);
+        upstream.data.pipe(sizeLimit).pipe(res);
     } catch {
-        res.status(502).json({ error: 'Could not load image.' });
+        if (!res.destroyed && !res.headersSent) res.status(502).json({ error: 'Could not load image.' });
     }
 });
 
-// send index.html for any other route
-app.get('*', (req, res) => {
+app.use('/api', (req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
+
+// send index.html for any other GET route
+app.get('/{*splat}', (req, res) => {
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
-// this is a function to start the server.
-const PORT = parseInt(process.env.PORT, 10) || 5224;
-
-app.listen(PORT, '0.0.0.0', () => {
-    Logger.success(`Ripcord server live at http://localhost:${PORT}`);
-    Logger.info('Ready for requests under domain (e.g. webjuniors.org)');
+app.use((err, req, res, next) => {
+    Logger.error(`Unhandled request error: ${err.message}`);
+    if (res.headersSent) return res.destroy();
+    res.status(500).json({ error: 'Internal server error.' });
 });
+
+if (require.main === module) {
+    const PORT = positiveIntegerEnv('PORT', 5224, 65535);
+    const server = app.listen(PORT, '0.0.0.0', () => {
+        Logger.success(`Ripcord server live at http://localhost:${PORT}`);
+        Logger.info('Ready for requests under domain');
+    });
+    server.headersTimeout = 15000;
+    server.requestTimeout = 30000;
+    server.keepAliveTimeout = 5000;
+}
+
+module.exports = { app, isSafeUrl, MetadataSemaphore };
