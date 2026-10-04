@@ -2,8 +2,9 @@
 
 A clean, self-hosted web tool for extracting tagged audio from Spotify and YouTube links.
 
-Hosted under [webjuniors.org](https://webjuniors.org).
+Hosted under [webjuniors.org](https://webjuniors.org) platform.
 
+Currently available at: [ripcord.webjuniors.org](https://dev-ripcord.webjuniors.org).
 ---
 
 ## What It Does
