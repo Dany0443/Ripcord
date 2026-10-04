@@ -343,7 +343,14 @@ el.snackbarClose.addEventListener('click', () => el.snackbar.classList.remove('s
 el.aboutBtn.addEventListener('click', () => el.about.showModal());
 el.aboutClose.addEventListener('click', () => el.about.close());
 el.about.addEventListener('click', event => {
-    if (event.target === el.about) el.about.close();
+    const rect = el.about.getBoundingClientRect();
+    const isInDialog = (
+        rect.top <= event.clientY &&
+        event.clientY <= rect.bottom &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.right
+    );
+    if (!isInDialog) el.about.close();
 });
 
 // spin the vinyl record cover while loading
