@@ -71,11 +71,8 @@ function positiveIntegerEnv(name, fallback, max) {
 
 const RATE_LIMIT_WINDOW_MS = positiveIntegerEnv('RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000, 24 * 60 * 60 * 1000);
 const API_RATE_LIMIT_MAX = positiveIntegerEnv('RATE_LIMIT_MAX', 120, 10000);
-const INFO_RATE_LIMIT_MAX = positiveIntegerEnv('FETCH_INFO_RATE_LIMIT_MAX', 30, 1000);
-const DOWNLOAD_RATE_LIMIT_MAX = positiveIntegerEnv('DOWNLOAD_RATE_LIMIT_MAX', 8, 1000);
-const COVER_RATE_LIMIT_MAX = positiveIntegerEnv('COVER_RATE_LIMIT_MAX', 120, 5000);
-const DOWNLOAD_CONCURRENCY = positiveIntegerEnv('DOWNLOAD_CONCURRENCY', 4, 4);
-const METADATA_CONCURRENCY = positiveIntegerEnv('METADATA_CONCURRENCY', 4, 8);
+const DOWNLOAD_CONCURRENCY = positiveIntegerEnv('DOWNLOAD_CONCURRENCY', 4, 8);
+const METADATA_CONCURRENCY = positiveIntegerEnv('METADATA_CONCURRENCY', DOWNLOAD_CONCURRENCY, 8);
 const MAX_QUEUED_DOWNLOADS = positiveIntegerEnv('MAX_QUEUED_DOWNLOADS', 8, 100);
 const MAX_PLAYLIST_TRACKS = positiveIntegerEnv('MAX_PLAYLIST_TRACKS', 30, 100);
 const MAX_PLAYLIST_OUTPUT_BYTES = positiveIntegerEnv('MAX_PLAYLIST_OUTPUT_BYTES', 2 * 1024 * 1024, 16 * 1024 * 1024);
@@ -326,10 +323,7 @@ app.use('/api', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     next();
 });
-app.use('/api', createRateLimiter(API_RATE_LIMIT_MAX, 'Too many API requests. Please wait before trying again.'));
-app.use('/api/fetch-info', createRateLimiter(INFO_RATE_LIMIT_MAX, 'Too many metadata requests. Please wait before trying again.'));
-app.use('/api/download', createRateLimiter(DOWNLOAD_RATE_LIMIT_MAX, 'Too many download requests. Please wait before trying again.'));
-app.use('/api/cover', createRateLimiter(COVER_RATE_LIMIT_MAX, 'Too many cover requests. Please wait before trying again.'));
+app.use('/api', createRateLimiter(API_RATE_LIMIT_MAX, 'Too many requests. Please wait before trying again.'));
 
 function rejectCrossSiteRequests(req, res, next) {
     if (String(req.get('sec-fetch-site') || '').toLowerCase() === 'cross-site') {
