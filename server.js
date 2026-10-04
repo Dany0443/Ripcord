@@ -9,23 +9,29 @@ const { Transform } = require('node:stream');
 const { spawn, spawnSync } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
-const NodeID3 = require('node-id3');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 
-// check if ffmpeg is on the system, otherwise use the bundled one
-let ffmpegPath = 'ffmpeg';
-try {
-    const checkFfmpeg = spawnSync('which', ['ffmpeg']);
-    if (checkFfmpeg.status === 0 && checkFfmpeg.stdout.toString().trim()) {
-        ffmpegPath = checkFfmpeg.stdout.toString().trim();
-    } else if (ffmpegStatic) {
-        ffmpegPath = ffmpegStatic;
+function findExecutableInPath(command) {
+    const extensions = process.platform === 'win32'
+        ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';')
+        : [''];
+
+    for (const directory of (process.env.PATH || '').split(path.delimiter)) {
+        for (const extension of extensions) {
+            const candidate = path.resolve(directory || '.', `${command}${extension}`);
+            try {
+                fs.accessSync(candidate, fs.constants.X_OK);
+                return candidate;
+            } catch (e) { }
+        }
     }
-} catch (e) {
-    if (ffmpegStatic) ffmpegPath = ffmpegStatic;
+    return null;
 }
+
+// Resolve directly from PATH so broken local `which` shims cannot hide system FFmpeg.
+const ffmpegPath = findExecutableInPath('ffmpeg') || ffmpegStatic || 'ffmpeg';
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 // make sure yt-dlp is installed and in the system path
@@ -68,22 +74,61 @@ const API_RATE_LIMIT_MAX = positiveIntegerEnv('RATE_LIMIT_MAX', 120, 10000);
 const INFO_RATE_LIMIT_MAX = positiveIntegerEnv('FETCH_INFO_RATE_LIMIT_MAX', 30, 1000);
 const DOWNLOAD_RATE_LIMIT_MAX = positiveIntegerEnv('DOWNLOAD_RATE_LIMIT_MAX', 8, 1000);
 const COVER_RATE_LIMIT_MAX = positiveIntegerEnv('COVER_RATE_LIMIT_MAX', 120, 5000);
-const DOWNLOAD_CONCURRENCY = positiveIntegerEnv('DOWNLOAD_CONCURRENCY', 2, 4);
-const METADATA_CONCURRENCY = positiveIntegerEnv('METADATA_CONCURRENCY', 2, 8);
+const DOWNLOAD_CONCURRENCY = positiveIntegerEnv('DOWNLOAD_CONCURRENCY', 4, 4);
+const METADATA_CONCURRENCY = positiveIntegerEnv('METADATA_CONCURRENCY', 4, 8);
 const MAX_QUEUED_DOWNLOADS = positiveIntegerEnv('MAX_QUEUED_DOWNLOADS', 8, 100);
-const MAX_PLAYLIST_TRACKS = 30;
-const MAX_PLAYLIST_OUTPUT_BYTES = 2 * 1024 * 1024;
-const MAX_COVER_BYTES = 5 * 1024 * 1024;
-const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
-const MAX_AUDIO_OUTPUT_BYTES = 150 * 1024 * 1024;
-const MAX_ZIP_TRACK_BYTES = 40 * 1024 * 1024;
-const TRUST_PROXY_HOPS = process.env.TRUST_PROXY_HOPS === undefined
-    ? false
-    : positiveIntegerEnv('TRUST_PROXY_HOPS', 1, 5);
+const MAX_PLAYLIST_TRACKS = positiveIntegerEnv('MAX_PLAYLIST_TRACKS', 30, 100);
+const MAX_PLAYLIST_OUTPUT_BYTES = positiveIntegerEnv('MAX_PLAYLIST_OUTPUT_BYTES', 2 * 1024 * 1024, 16 * 1024 * 1024);
+const MAX_COVER_BYTES = positiveIntegerEnv('MAX_COVER_BYTES', 5 * 1024 * 1024, 20 * 1024 * 1024);
+const MAX_DOWNLOAD_BYTES = positiveIntegerEnv('MAX_DOWNLOAD_BYTES', 100 * 1024 * 1024, 512 * 1024 * 1024);
+const MAX_AUDIO_OUTPUT_BYTES = positiveIntegerEnv('MAX_AUDIO_OUTPUT_BYTES', 150 * 1024 * 1024, 512 * 1024 * 1024);
+const MAX_ZIP_TRACK_BYTES = positiveIntegerEnv('MAX_ZIP_TRACK_BYTES', 40 * 1024 * 1024, 128 * 1024 * 1024);
+const ENCODE_CONCURRENCY = positiveIntegerEnv('ENCODE_CONCURRENCY', Math.max(1, Math.min(2, os.cpus().length)), 8);
+const YTDLP_CONCURRENT_FRAGMENTS = positiveIntegerEnv('YTDLP_CONCURRENT_FRAGMENTS', 4, 16);
+const WORK_DIR = process.env.WORK_DIR || os.tmpdir();
+if (!path.isAbsolute(WORK_DIR)) throw new Error('WORK_DIR must be an absolute path.');
+fs.mkdirSync(WORK_DIR, { recursive: true });
+const YTDLP_USE_ARIA2C = String(process.env.YTDLP_USE_ARIA2C || '').toLowerCase() === 'true';
+const TRUST_PROXY_HOPS_VALUE = process.env.TRUST_PROXY_HOPS === undefined || process.env.TRUST_PROXY_HOPS === ''
+    ? 0
+    : Number(process.env.TRUST_PROXY_HOPS);
+if (!Number.isSafeInteger(TRUST_PROXY_HOPS_VALUE) || TRUST_PROXY_HOPS_VALUE < 0 || TRUST_PROXY_HOPS_VALUE > 5) {
+    throw new Error('TRUST_PROXY_HOPS must be an integer between 0 and 5.');
+}
+const TRUST_PROXY_HOPS = TRUST_PROXY_HOPS_VALUE || false;
 
 if (!ytdlpAvailable) {
     Logger.error('yt-dlp is not installed or not in PATH. Please install yt-dlp: https://github.com/yt-dlp/yt-dlp');
 }
+
+const checkAria2c = spawnSync('aria2c', ['--version']);
+const aria2cAvailable = checkAria2c.status === 0;
+Logger.info(`aria2c: ${aria2cAvailable ? 'available' : 'not installed'}${YTDLP_USE_ARIA2C && aria2cAvailable ? ' (enabled)' : ''}`);
+
+function cleanupStaleWorkFiles() {
+    const staleBefore = Date.now() - 6 * 60 * 60 * 1000;
+    const prefixes = ['ripcord_', 'out_', 'track_', 'cover_', 'tagged_', 'comments_'];
+    let removed = 0;
+    try {
+        for (const entry of fs.readdirSync(WORK_DIR, { withFileTypes: true })) {
+            if (!entry.isFile() || !prefixes.some(prefix => entry.name.startsWith(prefix))) continue;
+            const filePath = path.join(WORK_DIR, entry.name);
+            try {
+                if (fs.statSync(filePath).mtimeMs < staleBefore) {
+                    fs.unlinkSync(filePath);
+                    removed++;
+                }
+            } catch (error) {
+                Logger.warn(`Unable to sweep temporary file ${entry.name}: ${error.message}`);
+            }
+        }
+    } catch (error) {
+        Logger.warn(`Unable to sweep work directory ${WORK_DIR}: ${error.message}`);
+    }
+    Logger.info(`Temporary file sweep removed ${removed} stale file(s) from ${WORK_DIR}`);
+}
+
+cleanupStaleWorkFiles();
 
 // optional cookies file if youtube starts blocking downloads
 const COOKIES_PATH = process.env.YTDLP_COOKIES_PATH || (fs.existsSync(path.join(__dirname, 'cookies.txt')) ? path.join(__dirname, 'cookies.txt') : null);
@@ -189,6 +234,55 @@ class MetadataSemaphore {
                 break;
             }
         };
+    }
+}
+
+class AsyncBoundedQueue {
+    constructor(capacity) {
+        this.capacity = capacity;
+        this.items = [];
+        this.readers = [];
+        this.writers = [];
+        this.closed = false;
+    }
+
+    async push(value) {
+        if (this.closed) throw new Error('Queue is closed.');
+        if (this.readers.length > 0) {
+            this.readers.shift()(value);
+            return;
+        }
+        if (this.items.length < this.capacity) {
+            this.items.push(value);
+            return;
+        }
+        await new Promise((resolve, reject) => this.writers.push({ value, resolve, reject }));
+    }
+
+    async shift() {
+        if (this.items.length > 0) {
+            const value = this.items.shift();
+            const writer = this.writers.shift();
+            if (writer) {
+                this.items.push(writer.value);
+                writer.resolve();
+            }
+            return value;
+        }
+        if (this.writers.length > 0) {
+            const writer = this.writers.shift();
+            writer.resolve();
+            return writer.value;
+        }
+        if (this.closed) return null;
+        return new Promise(resolve => this.readers.push(resolve));
+    }
+
+    close(error = new Error('Queue is closed.')) {
+        if (this.closed) return;
+        this.closed = true;
+        while (this.readers.length > 0) this.readers.shift()(null);
+        while (this.writers.length > 0) this.writers.shift().reject(error);
     }
 }
 
@@ -617,17 +711,23 @@ async function getSpotifyData(url, signal) {
 }
 
 // download the raw audio stream to a temp file using yt-dlp
-async function downloadToTemp(targetUrl, extension = 'webm', signal) {
-    const tempPath = path.join(os.tmpdir(), `ripcord_${randomUUID()}.${extension}`);
+async function downloadToTemp(targetUrl, extension = 'webm', signal, targetFormat) {
+    const tempPath = path.join(WORK_DIR, `ripcord_${randomUUID()}.${extension}`);
 
     return new Promise((resolve, reject) => {
+        const formatSelector = targetFormat === 'ogg'
+            ? 'bestaudio[acodec=opus]/bestaudio/best'
+            : targetFormat === 'm4a' ? 'bestaudio[acodec=aac]/bestaudio/best' : 'bestaudio/best';
         const ytdlpArgs = [
-            '-f', 'bestaudio/best',
+            '-f', formatSelector,
             '--no-playlist',
             '--no-warnings',
             '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
+            '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
             '--extractor-args', 'youtube:player_client=android,web'
         ];
+
+        if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
 
         if (COOKIES_PATH) {
             ytdlpArgs.push('--cookies', COOKIES_PATH);
@@ -674,6 +774,73 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal) {
     });
 }
 
+function runFfmpeg(args, timeoutMessage, signal) {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) return reject(new Error('Request cancelled.'));
+
+        const ff = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+        let timedOut = false;
+        let stderr = '';
+        const timeout = setTimeout(() => {
+            timedOut = true;
+            ff.kill('SIGKILL');
+        }, 60000);
+        const onAbort = () => ff.kill('SIGKILL');
+        signal?.addEventListener('abort', onAbort, { once: true });
+        ff.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-4000); });
+        ff.on('error', error => {
+            clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
+            reject(error);
+        });
+        ff.on('close', code => {
+            clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
+            if (signal?.aborted) reject(new Error('Request cancelled.'));
+            else if (timedOut) reject(new Error(timeoutMessage));
+            else if (code !== 0) reject(new Error(stderr.trim().slice(-1000) || 'FFmpeg encoding failed.'));
+            else resolve();
+        });
+    });
+}
+
+function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, title, artist, maxBytes, copyAudio = false) {
+    const args = ['-y', '-i', audioPath];
+    const embedsCover = coverPath && ['mp3', 'm4a'].includes(format);
+    if (embedsCover) args.push('-i', coverPath);
+    args.push('-map', '0:a:0');
+    if (embedsCover) args.push('-map', '1:v:0');
+
+    if (copyAudio) args.push('-c:a', 'copy');
+    else if (format === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', `${bitrate}k`);
+    else if (format === 'm4a') args.push('-c:a', 'aac', '-b:a', `${bitrate}k`);
+    else if (format === 'ogg') args.push('-c:a', 'libvorbis', '-b:a', `${bitrate}k`);
+    else if (format === 'wav') args.push('-c:a', 'pcm_s16le');
+    else if (format === 'flac') args.push('-c:a', 'flac', '-compression_level', '0');
+
+    if (title) args.push('-metadata', `title=${title}`);
+    if (artist) args.push('-metadata', `artist=${artist}`);
+    if (embedsCover) {
+        args.push('-c:v', 'mjpeg');
+        if (format === 'mp3') {
+            args.push('-id3v2_version', '3', '-metadata:s:v', 'title=Album cover');
+        }
+        args.push('-disposition:v', 'attached_pic');
+    }
+    args.push('-fs', String(maxBytes), outputPath);
+    return args;
+}
+
+function probeAudioCodec(filePath) {
+    return new Promise(resolve => {
+        ffmpeg.ffprobe(filePath, (error, metadata) => {
+            if (error) return resolve(null);
+            const audioStream = metadata?.streams?.find(stream => stream.codec_type === 'audio');
+            resolve(audioStream?.codec_name || null);
+        });
+    });
+}
+
 // attach album cover art to flac or ogg files
 function injectVorbisCoverArt(filePath, imgPath, format) {
     if (!fs.existsSync(imgPath) || !fs.existsSync(filePath)) return false;
@@ -704,7 +871,7 @@ function injectVorbisCoverArt(filePath, imgPath, format) {
             comments = comments.filter(c => c && !c.startsWith('metadata_block_picture='));
             comments.push(`metadata_block_picture=${base64Block}`);
 
-            const tempCommentsFile = path.join(os.tmpdir(), `comments_${randomUUID()}.txt`);
+            const tempCommentsFile = path.join(WORK_DIR, `comments_${randomUUID()}.txt`);
             fs.writeFileSync(tempCommentsFile, comments.join('\n'));
             try {
                 const writeResult = spawnSync('vorbiscomment', ['-w', '-R', '-c', tempCommentsFile, filePath], { timeout: 15000, windowsHide: true });
@@ -738,7 +905,7 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
 
     try {
         Logger.info('Downloading validated audio source');
-        const tempAudioPath = await downloadToTemp(target, 'webm', signal);
+        const tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format);
         tempFiles.push(tempAudioPath);
 
         let tempImgPath = '';
@@ -754,7 +921,7 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
                     signal
                 });
                 if (imgRes.status === 200 && String(imgRes.headers['content-type'] || '').toLowerCase().startsWith('image/jpeg')) {
-                    tempImgPath = path.join(os.tmpdir(), `cover_${randomUUID()}.img`);
+                    tempImgPath = path.join(WORK_DIR, `cover_${randomUUID()}.img`);
                     fs.writeFileSync(tempImgPath, Buffer.from(imgRes.data));
                     tempFiles.push(tempImgPath);
                 }
@@ -763,93 +930,21 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
             }
         }
 
-        const tempOutPath = path.join(os.tmpdir(), `out_${randomUUID()}.${format}`);
+        const tempOutPath = path.join(WORK_DIR, `out_${randomUUID()}.${format}`);
         tempFiles.push(tempOutPath);
 
-        const ffmpegFormatMap = { mp3: 'mp3', m4a: 'ipod', ogg: 'ogg', wav: 'wav', flac: 'flac' };
-        const ffmpegFormat = ffmpegFormatMap[format] || 'mp3';
+        const sourceCodec = await probeAudioCodec(tempAudioPath);
+        const copyAudio = (format === 'ogg' && sourceCodec === 'opus') || (format === 'm4a' && sourceCodec === 'aac');
+        Logger.info(copyAudio
+            ? `Remuxing ${sourceCodec} audio into [${format.toUpperCase()}]`
+            : `Encoding audio to [${format.toUpperCase()}] at ${bitrate} kbps`);
+        const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, format, bitrate, tempImgPath, filename || 'Track', artist || 'Unknown Artist', MAX_AUDIO_OUTPUT_BYTES, copyAudio);
+        await runFfmpeg(args, 'Audio encoding timed out.', signal);
+        if (signal?.aborted) throw new Error('Request cancelled.');
+        if (fs.statSync(tempOutPath).size >= MAX_AUDIO_OUTPUT_BYTES) throw new Error('Audio output exceeds the allowed size.');
 
-        Logger.info(`Encoding audio to [${format.toUpperCase()}] at ${bitrate} kbps`);
-        await new Promise((resolve, reject) => {
-            const ff = ffmpeg(tempAudioPath);
-            const opts = ['-map', '0:a:0'];
-
-            if (format === 'mp3') opts.push('-c:a', 'libmp3lame');
-            else if (format === 'm4a') opts.push('-c:a', 'aac');
-            else if (format === 'ogg') opts.push('-c:a', 'libvorbis');
-            else if (format === 'wav') opts.push('-c:a', 'pcm_s16le');
-            else if (format === 'flac') opts.push('-c:a', 'flac');
-            opts.push('-fs', String(MAX_AUDIO_OUTPUT_BYTES));
-
-            const ffTimeout = setTimeout(() => {
-                ff.kill('SIGKILL');
-                reject(new Error('Audio encoding timed out.'));
-            }, 60000);
-            const onAbort = () => ff.kill('SIGKILL');
-            if (signal?.aborted) {
-                clearTimeout(ffTimeout);
-                reject(new Error('Request cancelled.'));
-                return;
-            }
-            signal?.addEventListener('abort', onAbort, { once: true });
-
-            ff.outputOptions(opts)
-                .audioBitrate(bitrate)
-                .format(ffmpegFormat)
-                .save(tempOutPath)
-                .on('error', (err) => { clearTimeout(ffTimeout); signal?.removeEventListener('abort', onAbort); reject(err); })
-                .on('end', () => { clearTimeout(ffTimeout); signal?.removeEventListener('abort', onAbort); resolve(); });
-        });
-            if (signal?.aborted) throw new Error('Request cancelled.');
-            if (fs.statSync(tempOutPath).size >= MAX_AUDIO_OUTPUT_BYTES) throw new Error('Audio output exceeds the allowed size.');
-
-        // attach the cover image to the converted audio
-        if (tempImgPath && fs.existsSync(tempOutPath)) {
-            if (format === 'm4a' || format === 'wav') {
-                const taggedPath = path.join(os.tmpdir(), `tagged_${randomUUID()}.${format}`);
-                tempFiles.push(taggedPath);
-                try {
-                    let args = [];
-                    if (format === 'wav') {
-                        args = ['-y', '-i', tempOutPath, '-i', tempImgPath, '-map', '0:a', '-map', '1:v', '-c:a', 'copy', '-c:v', 'mjpeg', '-id3v2_version', '3', '-metadata:s:v', 'title=Album cover', taggedPath];
-                    } else if (format === 'm4a') {
-                        args = ['-y', '-i', tempOutPath, '-i', tempImgPath, '-map', '0:a', '-map', '1:v', '-c:a', 'copy', '-c:v', 'mjpeg', '-disposition:v', 'attached_pic', taggedPath];
-                    }
-                    if (args.length) {
-                        const tagResult = spawnSync('ffmpeg', args, { stdio: 'ignore', timeout: 30000, windowsHide: true });
-                        if (tagResult.error || tagResult.status !== 0) throw new Error('Unable to embed cover art.');
-                        if (fs.existsSync(taggedPath)) {
-                            fs.copyFileSync(taggedPath, tempOutPath);
-                        }
-                    }
-                } catch (e) {
-                    Logger.warn(`Tagging command omitted: ${e.message}`);
-                }
-            } else if (format === 'ogg' || format === 'flac') {
-                injectVorbisCoverArt(tempOutPath, tempImgPath, format);
-            }
-        }
-
-        // add id3 tags and cover art for mp3 files
-        if (format === 'mp3' && fs.existsSync(tempOutPath)) {
-            try {
-                const tags = {
-                    title: filename || 'Track',
-                    artist: artist || 'Unknown Artist'
-                };
-                if (tempImgPath && fs.existsSync(tempImgPath)) {
-                    tags.image = {
-                        mime: 'image/jpeg',
-                        type: { id: 3, name: 'front cover' },
-                        description: 'Cover Art',
-                        imageBuffer: fs.readFileSync(tempImgPath)
-                    };
-                }
-                const updatedBuffer = NodeID3.write(tags, fs.readFileSync(tempOutPath));
-                fs.writeFileSync(tempOutPath, updatedBuffer);
-            } catch (metaErr) {
-                Logger.warn(`ID3 tag injection error: ${metaErr.message}`);
-            }
+        if (tempImgPath && fs.existsSync(tempOutPath) && (format === 'ogg' || format === 'flac')) {
+            injectVorbisCoverArt(tempOutPath, tempImgPath, format);
         }
 
         Logger.success(`Encoding complete. Streaming ${format.toUpperCase()} to client`);
@@ -876,14 +971,13 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
     }
 }
 
-// convert one song so we can add it to the zip file
-async function processPlaylistTrack(track, index, audioBitrate, audioFormat, ffmpegFormat, signal) {
+async function downloadPlaylistTrack(track, index, audioFormat, signal) {
     const tempFiles = [];
 
     try {
         const title = String(track.title || 'Unknown Track').slice(0, 200);
         const artist = String(track.artist || 'Unknown Artist').slice(0, 200);
-        Logger.info(`[Track ${index + 1}] Processing: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
+        Logger.info(`[Track ${index + 1}] Downloading: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
 
         let downloadTarget;
         if (track.url) {
@@ -894,86 +988,60 @@ async function processPlaylistTrack(track, index, audioBitrate, audioFormat, ffm
             downloadTarget = `ytsearch1:${title} ${cleanArtist}`;
         }
 
-        const downloadPromises = [downloadToTemp(downloadTarget, 'webm', signal)];
+        const downloadPromise = downloadToTemp(downloadTarget, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat);
         let tempImgPath = '';
         const safeThumbnail = parseCoverUrl(track.thumbnail);
 
-        if (safeThumbnail) {
-            downloadPromises.push(
-                axios.get(safeThumbnail.href, {
-                    responseType: 'arraybuffer',
-                    headers: { 'User-Agent': 'Mozilla/5.0' },
-                    timeout: 6000,
-                    maxRedirects: 0,
-                    maxContentLength: MAX_COVER_BYTES,
-                    signal
-                })
-                    .then(imgRes => {
-                        if (imgRes.status === 200 && String(imgRes.headers['content-type'] || '').toLowerCase().startsWith('image/jpeg')) {
-                            tempImgPath = path.join(os.tmpdir(), `cover_zip_${randomUUID()}.img`);
-                            fs.writeFileSync(tempImgPath, Buffer.from(imgRes.data));
-                            tempFiles.push(tempImgPath);
-                        }
-                    }).catch(() => { })
-            );
-        }
+        const coverPromise = safeThumbnail
+            ? axios.get(safeThumbnail.href, {
+                responseType: 'arraybuffer',
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                timeout: 6000,
+                maxRedirects: 0,
+                maxContentLength: MAX_COVER_BYTES,
+                signal
+            })
+                .then(imgRes => {
+                    if (imgRes.status === 200 && String(imgRes.headers['content-type'] || '').toLowerCase().startsWith('image/jpeg')) {
+                        tempImgPath = path.join(WORK_DIR, `cover_zip_${randomUUID()}.img`);
+                        fs.writeFileSync(tempImgPath, Buffer.from(imgRes.data));
+                        tempFiles.push(tempImgPath);
+                    }
+                }).catch(() => { })
+            : Promise.resolve();
 
-        const results = await Promise.all(downloadPromises);
-        const tempAudioPath = results[0];
+        const [tempAudioPath] = await Promise.all([downloadPromise, coverPromise]);
         tempFiles.push(tempAudioPath);
+        return { track, index, title, artist, tempAudioPath, tempImgPath };
+    } catch (err) {
+        Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - ${err.message}`);
+        cleanupFiles(tempFiles);
+        return null;
+    }
+}
 
-        const tempOutPath = path.join(os.tmpdir(), `track_${randomUUID()}.${audioFormat}`);
+// convert one downloaded song so it can be added to the zip file
+async function processPlaylistTrack(source, audioBitrate, audioFormat, signal) {
+    const { track, index, title, artist, tempAudioPath, tempImgPath } = source;
+    const tempFiles = [tempAudioPath, tempImgPath].filter(Boolean);
+
+    try {
+        Logger.info(`[Track ${index + 1}] Encoding: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
+        const tempOutPath = path.join(WORK_DIR, `track_${randomUUID()}.${audioFormat}`);
         tempFiles.push(tempOutPath);
 
-        await new Promise((resolve, reject) => {
-            const ff = ffmpeg(tempAudioPath);
-            const outOpts = ['-map', '0:a:0'];
-
-            if (audioFormat === 'mp3') outOpts.push('-c:a', 'libmp3lame');
-            else if (audioFormat === 'm4a') outOpts.push('-c:a', 'aac');
-            else if (audioFormat === 'ogg') outOpts.push('-c:a', 'libvorbis');
-            else if (audioFormat === 'wav') outOpts.push('-c:a', 'pcm_s16le');
-            else if (audioFormat === 'flac') outOpts.push('-c:a', 'flac');
-            outOpts.push('-fs', String(MAX_ZIP_TRACK_BYTES));
-
-            const ffTimeout = setTimeout(() => {
-                ff.kill('SIGKILL');
-                reject(new Error('Track encoding timed out.'));
-            }, 60000);
-
-            const onAbort = () => ff.kill('SIGKILL');
-            if (signal?.aborted) {
-                clearTimeout(ffTimeout);
-                reject(new Error('Request cancelled.'));
-                return;
-            }
-            signal?.addEventListener('abort', onAbort, { once: true });
-
-            ff.outputOptions(outOpts)
-                .audioBitrate(audioBitrate)
-                .format(ffmpegFormat)
-                .save(tempOutPath)
-                .on('error', (err) => { clearTimeout(ffTimeout); signal?.removeEventListener('abort', onAbort); reject(err); })
-                .on('end', () => { clearTimeout(ffTimeout); signal?.removeEventListener('abort', onAbort); resolve(); });
-        });
+        const sourceCodec = await probeAudioCodec(tempAudioPath);
+        const copyAudio = (audioFormat === 'ogg' && sourceCodec === 'opus') || (audioFormat === 'm4a' && sourceCodec === 'aac');
+        Logger.info(copyAudio
+            ? `[Track ${index + 1}] Remuxing ${sourceCodec} audio into [${audioFormat.toUpperCase()}]`
+            : `[Track ${index + 1}] Encoding audio to [${audioFormat.toUpperCase()}] at ${audioBitrate} kbps`);
+        const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, MAX_ZIP_TRACK_BYTES, copyAudio);
+        await runFfmpeg(args, 'Track encoding timed out.', signal);
         if (signal?.aborted) throw new Error('Request cancelled.');
         if (fs.statSync(tempOutPath).size >= MAX_ZIP_TRACK_BYTES) throw new Error('Playlist track exceeds the allowed size.');
 
-        // tag each mp3 in the playlist with cover art and metadata
-        if (tempImgPath && fs.existsSync(tempOutPath)) {
-            if (audioFormat === 'mp3') {
-                try {
-                    const tags = { title, artist };
-                    tags.image = {
-                        mime: 'image/jpeg',
-                        type: { id: 3, name: 'front cover' },
-                        description: 'Cover Art',
-                        imageBuffer: fs.readFileSync(tempImgPath)
-                    };
-                    const updated = NodeID3.write(tags, fs.readFileSync(tempOutPath));
-                    fs.writeFileSync(tempOutPath, updated);
-                } catch (e) { }
-            }
+        if (tempImgPath && fs.existsSync(tempOutPath) && (audioFormat === 'ogg' || audioFormat === 'flac')) {
+            injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
         }
 
         if (fs.statSync(tempOutPath).size > MAX_ZIP_TRACK_BYTES) throw new Error('Playlist track exceeds the allowed size.');
@@ -1006,8 +1074,6 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
         };
         const mimeType = mimeTypes[audioFormat] || 'audio/mpeg';
         const asciiFilename = sanitizeAsciiHeader(safeFilename);
-        const ffmpegFormatMap = { mp3: 'mp3', m4a: 'ipod', ogg: 'ogg', wav: 'wav', flac: 'flac' };
-        const ffmpegFormat = ffmpegFormatMap[audioFormat] || 'mp3';
 
         // download a single youtube video
         if (isYouTubeUrl(url) && !isYouTubePlaylist(url)) {
@@ -1050,13 +1116,21 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             archive.pipe(res);
 
             archive.on('warning', (err) => Logger.warn(`ZIP archive warning: ${err.message}`));
-            const trackFilePaths = [];
-            let trackFilesCleaned = false;
+            const trackFilePaths = new Set();
+            const archiveFilePaths = new Map();
             const cleanupTrackFiles = () => {
-                if (trackFilesCleaned) return;
-                trackFilesCleaned = true;
-                cleanupFiles(trackFilePaths);
+                cleanupFiles([...trackFilePaths]);
+                trackFilePaths.clear();
+                archiveFilePaths.clear();
             };
+            archive.on('entry', entry => {
+                const filePath = archiveFilePaths.get(entry.name);
+                if (filePath) {
+                    cleanupFiles([filePath]);
+                    trackFilePaths.delete(filePath);
+                    archiveFilePaths.delete(entry.name);
+                }
+            });
             archive.on('error', (err) => {
                 Logger.error(`ZIP archive error: ${err.message}`);
                 cleanupTrackFiles();
@@ -1072,30 +1146,56 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             if (signal.aborted) onAbort();
             else signal.addEventListener('abort', onAbort, { once: true });
 
-            // convert songs a few at a time so we do not run out of memory
-            const batchSize = 3;
             const tracks = collectionData.tracks.slice(0, MAX_PLAYLIST_TRACKS);
             let addedTracks = 0;
 
             try {
-                for (let i = 0; i < tracks.length; i += batchSize) {
-                    if (signal.aborted) throw new Error('Request cancelled.');
-                    const batch = tracks.slice(i, i + batchSize);
-                    Logger.info(`Processing batch ${Math.floor(i / batchSize) + 1} of ${Math.ceil(tracks.length / batchSize)}`);
-
-                    const results = await Promise.all(
-                        batch.map((track, j) => processPlaylistTrack(track, i + j, audioBitrate, audioFormat, ffmpegFormat, signal))
-                    );
-
-                    results.forEach(result => {
-                        if (result && result.filePath) {
-                            trackFilePaths.push(result.filePath);
-                            archive.file(result.filePath, { name: result.name });
-                            addedTracks++;
+                const handoffQueue = new AsyncBoundedQueue(4);
+                const encodedResults = new Array(tracks.length);
+                let nextTrack = 0;
+                const downloadWorker = async () => {
+                    while (!signal.aborted) {
+                        const index = nextTrack++;
+                        if (index >= tracks.length) return;
+                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal);
+                        if (!downloaded) continue;
+                        try {
+                            await handoffQueue.push(downloaded);
+                        } catch {
+                            cleanupFiles([downloaded.tempAudioPath, downloaded.tempImgPath]);
+                            return;
                         }
-                    });
+                    }
+                };
+                const encodeWorker = async () => {
+                    while (!signal.aborted) {
+                        const downloaded = await handoffQueue.shift();
+                        if (!downloaded) return;
+                        const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal);
+                        if (signal.aborted && result?.filePath) cleanupFiles([result.filePath]);
+                        else if (result) encodedResults[downloaded.index] = result;
+                    }
+                };
+
+                const encodeWorkers = Array.from({ length: ENCODE_CONCURRENCY }, () => encodeWorker());
+                const downloadWorkers = Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, tracks.length) }, () => downloadWorker());
+                await Promise.all(downloadWorkers);
+                handoffQueue.close();
+                await Promise.all(encodeWorkers);
+
+                for (const result of encodedResults) {
+                    if (!result?.filePath) continue;
+                    if (signal.aborted) {
+                        cleanupFiles([result.filePath]);
+                        continue;
+                    }
+                    trackFilePaths.add(result.filePath);
+                    archiveFilePaths.set(result.name, result.filePath);
+                    archive.file(result.filePath, { name: result.name });
+                    addedTracks++;
                 }
 
+                if (signal.aborted) throw new Error('Request cancelled.');
                 if (addedTracks === 0) throw new Error('No tracks could be processed.');
                 await archive.finalize();
                 Logger.success(`Archive completed: ${zipName}`);

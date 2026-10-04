@@ -36,9 +36,18 @@ Supported formats: MP3, M4A, FLAC, WAV, and OGG.
 ```bash
 git clone https://github.com/rusux64-bit/Ripcord.git
 cd Ripcord
+cp .env.example .env
 npm install
 npm start
 ```
+
+Adjust `.env` to tune rate limits, concurrency, and media resource ceilings. Values are validated and bounded; unset options use the defaults shown in `server.js`.
+
+### Performance Tuning
+
+For a small VPS with 1–2 CPU cores, keep `DOWNLOAD_CONCURRENCY` around 2–3 and set `ENCODE_CONCURRENCY=1`. On a larger machine, `DOWNLOAD_CONCURRENCY=4` and `ENCODE_CONCURRENCY=2` are reasonable starting points; increase gradually while watching CPU and memory use. `YTDLP_CONCURRENT_FRAGMENTS` controls parallel fragments per source download, and aria2c can be enabled with `YTDLP_USE_ARIA2C=true` when installed.
+
+Set `WORK_DIR` to an absolute path on tmpfs (for example `/dev/shm/ripcord`) to keep temporary media off persistent storage. Make sure the tmpfs has enough capacity for concurrent downloads and converted tracks.
 
 Open `http://localhost:5224`.
 
