@@ -19,7 +19,7 @@
     "mp3"
   ],
   "author": "Webjuniors & Friends",
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rusux64-bit/Ripcord.git"
