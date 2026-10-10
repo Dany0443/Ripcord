@@ -31,9 +31,6 @@ jobs:
           node --check server.js
           node --check public/script.js
 
-      - name: Test client bundle compilation
-        run: npm run build
-
       - name: Install FFmpeg & test server startup
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg

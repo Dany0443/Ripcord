@@ -5,8 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js",
-    "build": "esbuild src/script.js --bundle --format=esm --minify --outfile=public/script.js"
+    "dev": "node --watch server.js"
   },
   "keywords": [
     "ripcord",
@@ -36,12 +35,7 @@
     "helmet": "^8.1.0",
     "node-id3": "^0.2.9"
   },
-  "devDependencies": {
-    "@material/material-color-utilities": "^0.4.0",
-    "esbuild": "^0.28.2"
-  },
   "allowScripts": {
-    "esbuild@0.28.2": true,
     "ffmpeg-static@5.3.0": true
   }
 }
