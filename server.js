@@ -385,7 +385,6 @@ function rejectCrossSiteRequests(req, res, next) {
 
 // serve static files only after every API path has passed common protections
 const PUBLIC_DIR = path.join(__dirname, 'public');
-app.get('/favicon.ico', (req, res) => res.redirect(301, '/assets/favicon.ico'));
 app.use(express.static(PUBLIC_DIR, { dotfiles: 'deny' }));
 
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be']);
