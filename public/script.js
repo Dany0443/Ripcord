@@ -1,6 +1,12 @@
 // frontend logic for ripcord
 // handles fetching track metadata, showing screens, and downloading audio
 
+// initialize theme immediately
+try {
+    const theme = localStorage.getItem('ripcord.theme');
+    if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+} catch (e) { }
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 

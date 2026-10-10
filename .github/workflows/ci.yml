@@ -29,8 +29,7 @@ jobs:
       - name: Verify JavaScript syntax
         run: |
           node --check server.js
-          node --check public/app.js
-          node --check public/theme.js
+          node --check public/script.js
 
       - name: Test vendor bundle compilation
         run: npm run build:vendor
