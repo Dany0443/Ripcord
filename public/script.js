@@ -186,16 +186,22 @@ document.addEventListener('pointerdown', event => {
 
 // slightly move the background blobs when moving the mouse
 
+const backdropEl = document.querySelector('.backdrop');
 let parallaxQueued = false;
 addEventListener('pointermove', event => {
-    if (parallaxQueued || reduceMotion.matches) return;
+    if (parallaxQueued || reduceMotion.matches || !backdropEl) return;
     parallaxQueued = true;
     requestAnimationFrame(() => {
         parallaxQueued = false;
-        root.style.setProperty('--px', ((event.clientX / innerWidth) - 0.5).toFixed(3));
-        root.style.setProperty('--py', ((event.clientY / innerHeight) - 0.5).toFixed(3));
+        backdropEl.style.setProperty('--px', ((event.clientX / innerWidth) - 0.5).toFixed(3));
+        backdropEl.style.setProperty('--py', ((event.clientY / innerHeight) - 0.5).toFixed(3));
     });
 }, { passive: true });
+
+// pause animations when tab is hidden to save battery / CPU
+document.addEventListener('visibilitychange', () => {
+    root.classList.toggle('tab-hidden', document.hidden);
+});
 
 // extract theme colors from the album cover art
 
@@ -213,21 +219,26 @@ const TOKENS = [
     'inverse-surface', 'inverse-on-surface', 'inverse-primary'
 ];
 
+const TRANSITION_TOKENS = [
+    'primary', 'primary-container', 'secondary-container',
+    'tertiary-container', 'surface-container', 'surface'
+];
+
 let currentSeed = null;
 
 function initColourEngine() {
-    // register color properties so theme changes transition smoothly
-    for (const name of TOKENS) {
+    // register key color properties so theme and cover art changes transition smoothly
+    for (const name of TRANSITION_TOKENS) {
         try {
             CSS.registerProperty({ name: `--md-sys-color-${name}`, syntax: '<color>', inherits: true, initialValue: 'transparent' });
         } catch { /* already registered */ }
     }
     applyScheme();
-    // enable transitions only after the page paints so it does not flash on load
+    // enable transitions only on core visual tokens after the page paints
     requestAnimationFrame(() => {
         setTimeout(() => {
-            root.style.transition = TOKENS
-                .map(n => `--md-sys-color-${n} 0.8s ease`).join(', ');
+            root.style.transition = TRANSITION_TOKENS
+                .map(n => `--md-sys-color-${n} 0.5s ease`).join(', ');
         }, 150);
     });
 }
