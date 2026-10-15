@@ -1965,7 +1965,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', 'application/zip');
 
             const { ZipArchive } = await import('archiver');
-            const archive = new ZipArchive({ zlib: { level: 6 } });
+            const archive = new ZipArchive({ store: true });
             archive.pipe(res);
 
             archive.on('warning', (err) => Logger.warn(`ZIP archive warning: ${err.message}`));
