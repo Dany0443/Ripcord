@@ -1098,6 +1098,13 @@ syncPasteButton();
 setupSpin();
 syncThemeColorMeta();
 initColourEngine();
-setTimeout(() => {
-    $('#stage')?.classList.remove('rise');
-}, 800);
+
+// Hold intro (.rise) animations until document.fonts.ready (or 1s timeout cap)
+const fontsReadyPromise = document.fonts ? document.fonts.ready : Promise.resolve();
+const fontsTimeoutPromise = new Promise(resolve => setTimeout(resolve, 1000));
+Promise.race([fontsReadyPromise, fontsTimeoutPromise]).then(() => {
+    document.documentElement.classList.add('fonts-ready');
+    setTimeout(() => {
+        $('#stage')?.classList.remove('rise');
+    }, 800);
+});

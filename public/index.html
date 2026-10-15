@@ -14,6 +14,8 @@
     <meta property="og:description" content="Paste a link. Pull the sound out.">
     <meta property="og:type" content="website">
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+    <link rel="preload" href="/assets/fonts/roboto-flex-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/assets/fonts/material-symbols-rounded.woff2" as="font" type="font/woff2" crossorigin>
 
     <script>
         try {
@@ -24,7 +26,21 @@
         } catch {
             document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         }
+        Promise.race([
+            document.fonts ? document.fonts.ready : Promise.resolve(),
+            new Promise(function(r) { setTimeout(r, 1000); })
+        ]).then(function() {
+            document.documentElement.classList.add('fonts-ready');
+        });
     </script>
+    <noscript>
+        <style>
+            :root:not(.fonts-ready) .rise {
+                opacity: 1 !important;
+                animation: none !important;
+            }
+        </style>
+    </noscript>
 
     <link rel="stylesheet" href="styles.css">
 
@@ -59,6 +75,13 @@
         <section class="hero" aria-labelledby="hero-title">
             <p class="eyebrow rise" style="--i:0"><span class="icon fill" aria-hidden="true">wb_sunny</span><span
                     id="greeting">Hey there</span></p>
+            <script>
+                (function() {
+                    var h = new Date().getHours();
+                    var el = document.getElementById('greeting');
+                    if (el) el.textContent = h < 5 ? 'Up late? Same' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+                })();
+            </script>
             <h1 class="display rise" id="hero-title" style="--i:1">
                 <span class="wiggle">Got</span> <span class="wiggle">a</span> <span class="wiggle">link?</span>
                 <em><span class="wiggle">Let's</span> <span class="wiggle">pull</span> <span class="wiggle">the</span>
