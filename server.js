@@ -236,6 +236,58 @@ class MetadataSemaphore {
     }
 }
 
+class Semaphore {
+    constructor(concurrency) {
+        this.concurrency = concurrency;
+        this.running = 0;
+        this.queue = [];
+    }
+
+    async acquire(signal) {
+        if (signal?.aborted) throw new Error('Request cancelled.');
+        if (this.running < this.concurrency) {
+            this.running++;
+            return;
+        }
+
+        await new Promise((resolve, reject) => {
+            let waiter;
+            const onAbort = () => {
+                const idx = this.queue.indexOf(waiter);
+                if (idx !== -1) {
+                    this.queue.splice(idx, 1);
+                    reject(new Error('Request cancelled.'));
+                }
+            };
+
+            waiter = {
+                resolve: () => {
+                    if (signal) signal.removeEventListener('abort', onAbort);
+                    resolve();
+                },
+                reject: (err) => {
+                    if (signal) signal.removeEventListener('abort', onAbort);
+                    reject(err);
+                }
+            };
+
+            if (signal) {
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
+            this.queue.push(waiter);
+        });
+    }
+
+    release() {
+        while (this.queue.length > 0) {
+            const next = this.queue.shift();
+            next.resolve();
+            return;
+        }
+        this.running = Math.max(0, this.running - 1);
+    }
+}
+
 class AsyncBoundedQueue {
     constructor(capacity) {
         this.capacity = capacity;
@@ -287,6 +339,8 @@ class AsyncBoundedQueue {
 
 const downloadQueue = new DownloadQueue();
 const metadataSemaphore = new MetadataSemaphore();
+const ytdlpSemaphore = new Semaphore(DOWNLOAD_CONCURRENCY);
+const ffmpegSemaphore = new Semaphore(ENCODE_CONCURRENCY);
 
 // set up the express app
 const app = express();
@@ -1550,106 +1604,116 @@ async function getSpotifyData(url, signal) {
 // download the raw audio stream to a temp file using yt-dlp
 async function downloadToTemp(targetUrl, extension = 'webm', signal, targetFormat, onProgress) {
     const tempPath = path.join(WORK_DIR, `ripcord_${randomUUID()}.${extension}`);
+    await ytdlpSemaphore.acquire(signal);
 
-    return new Promise((resolve, reject) => {
-        const formatSelector = targetFormat === 'ogg'
-            ? 'bestaudio[acodec=opus]/bestaudio/best'
-            : targetFormat === 'm4a' ? 'bestaudio[acodec=aac]/bestaudio/best' : 'bestaudio/best';
-        const ytdlpArgs = [
-            '-f', formatSelector,
-            '--no-playlist',
-            '--no-warnings',
-            '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
-            '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
-            '--extractor-args', 'youtube:player_client=android,web'
-        ];
+    try {
+        return await new Promise((resolve, reject) => {
+            const formatSelector = targetFormat === 'ogg'
+                ? 'bestaudio[acodec=opus]/bestaudio/best'
+                : targetFormat === 'm4a' ? 'bestaudio[acodec=aac]/bestaudio/best' : 'bestaudio/best';
+            const ytdlpArgs = [
+                '-f', formatSelector,
+                '--no-playlist',
+                '--no-warnings',
+                '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
+                '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
+                '--extractor-args', 'youtube:player_client=android,web'
+            ];
 
-        if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
+            if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
 
-        if (COOKIES_PATH) {
-            ytdlpArgs.push('--cookies', COOKIES_PATH);
-        }
-
-        if (onProgress) {
-            ytdlpArgs.push('--newline', '--progress', '--progress-template',
-                'download:RIPCORD_PROGRESS %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s');
-        }
-
-        ytdlpArgs.push('-o', tempPath, '--', targetUrl);
-
-        const ytdlp = spawn('yt-dlp', ytdlpArgs);
-        ytdlp.stdout.on('data', chunk => {
-            if (!onProgress) return;
-            const matches = [...chunk.toString().matchAll(/RIPCORD_PROGRESS (\d+) (\d+(?:\.\d+)?)/g)];
-            const last = matches[matches.length - 1];
-            if (last && Number(last[2]) > 0) onProgress(Math.min(1, Number(last[1]) / Number(last[2])));
-        });
-        let timedOut = false;
-
-        const timeout = setTimeout(() => {
-            timedOut = true;
-            ytdlp.kill('SIGKILL');
-        }, 90000);
-        const onAbort = () => ytdlp.kill('SIGKILL');
-        if (signal?.aborted) onAbort();
-        else signal?.addEventListener('abort', onAbort, { once: true });
-
-        ytdlp.stderr.on('data', (data) => Logger.warn(`yt-dlp: ${data.toString().trim()}`));
-
-        ytdlp.on('close', (code) => {
-            clearTimeout(timeout);
-            signal?.removeEventListener('abort', onAbort);
-            if (signal?.aborted) {
-                cleanupFiles([tempPath]);
-                reject(new Error('Request cancelled.'));
-            } else if (timedOut) {
-                cleanupFiles([tempPath]);
-                reject(new Error('Audio download timed out.'));
-            } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
-                resolve(tempPath);
-            } else {
-                cleanupFiles([tempPath]);
-                reject(new Error('yt-dlp was unable to extract this audio source.'));
+            if (COOKIES_PATH) {
+                ytdlpArgs.push('--cookies', COOKIES_PATH);
             }
-        });
 
-        ytdlp.on('error', (err) => {
-            clearTimeout(timeout);
-            signal?.removeEventListener('abort', onAbort);
-            cleanupFiles([tempPath]);
-            reject(err);
+            if (onProgress) {
+                ytdlpArgs.push('--newline', '--progress', '--progress-template',
+                    'download:RIPCORD_PROGRESS %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s');
+            }
+
+            ytdlpArgs.push('-o', tempPath, '--', targetUrl);
+
+            const ytdlp = spawn('yt-dlp', ytdlpArgs);
+            ytdlp.stdout.on('data', chunk => {
+                if (!onProgress) return;
+                const matches = [...chunk.toString().matchAll(/RIPCORD_PROGRESS (\d+) (\d+(?:\.\d+)?)/g)];
+                const last = matches[matches.length - 1];
+                if (last && Number(last[2]) > 0) onProgress(Math.min(1, Number(last[1]) / Number(last[2])));
+            });
+            let timedOut = false;
+
+            const timeout = setTimeout(() => {
+                timedOut = true;
+                ytdlp.kill('SIGKILL');
+            }, 90000);
+            const onAbort = () => ytdlp.kill('SIGKILL');
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
+
+            ytdlp.stderr.on('data', (data) => Logger.warn(`yt-dlp: ${data.toString().trim()}`));
+
+            ytdlp.on('close', (code) => {
+                clearTimeout(timeout);
+                signal?.removeEventListener('abort', onAbort);
+                if (signal?.aborted) {
+                    cleanupFiles([tempPath]);
+                    reject(new Error('Request cancelled.'));
+                } else if (timedOut) {
+                    cleanupFiles([tempPath]);
+                    reject(new Error('Audio download timed out.'));
+                } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
+                    resolve(tempPath);
+                } else {
+                    cleanupFiles([tempPath]);
+                    reject(new Error('yt-dlp was unable to extract this audio source.'));
+                }
+            });
+
+            ytdlp.on('error', (err) => {
+                clearTimeout(timeout);
+                signal?.removeEventListener('abort', onAbort);
+                cleanupFiles([tempPath]);
+                reject(err);
+            });
         });
-    });
+    } finally {
+        ytdlpSemaphore.release();
+    }
 }
 
-function runFfmpeg(args, timeoutMessage, signal) {
-    return new Promise((resolve, reject) => {
-        if (signal?.aborted) return reject(new Error('Request cancelled.'));
+async function runFfmpeg(args, timeoutMessage, signal) {
+    await ffmpegSemaphore.acquire(signal);
+    try {
+        return await new Promise((resolve, reject) => {
+            if (signal?.aborted) return reject(new Error('Request cancelled.'));
 
-        const ff = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
-        let timedOut = false;
-        let stderr = '';
-        const timeout = setTimeout(() => {
-            timedOut = true;
-            ff.kill('SIGKILL');
-        }, 60000);
-        const onAbort = () => ff.kill('SIGKILL');
-        signal?.addEventListener('abort', onAbort, { once: true });
-        ff.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-4000); });
-        ff.on('error', error => {
-            clearTimeout(timeout);
-            signal?.removeEventListener('abort', onAbort);
-            reject(error);
+            const ff = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+            let timedOut = false;
+            let stderr = '';
+            const timeout = setTimeout(() => {
+                timedOut = true;
+                ff.kill('SIGKILL');
+            }, 60000);
+            const onAbort = () => ff.kill('SIGKILL');
+            signal?.addEventListener('abort', onAbort, { once: true });
+            ff.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-4000); });
+            ff.on('error', error => {
+                clearTimeout(timeout);
+                signal?.removeEventListener('abort', onAbort);
+                reject(error);
+            });
+            ff.on('close', code => {
+                clearTimeout(timeout);
+                signal?.removeEventListener('abort', onAbort);
+                if (signal?.aborted) reject(new Error('Request cancelled.'));
+                else if (timedOut) reject(new Error(timeoutMessage));
+                else if (code !== 0) reject(new Error(stderr.trim().slice(-1000) || 'FFmpeg encoding failed.'));
+                else resolve();
+            });
         });
-        ff.on('close', code => {
-            clearTimeout(timeout);
-            signal?.removeEventListener('abort', onAbort);
-            if (signal?.aborted) reject(new Error('Request cancelled.'));
-            else if (timedOut) reject(new Error(timeoutMessage));
-            else if (code !== 0) reject(new Error(stderr.trim().slice(-1000) || 'FFmpeg encoding failed.'));
-            else resolve();
-        });
-    });
+    } finally {
+        ffmpegSemaphore.release();
+    }
 }
 
 function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, title, artist, maxBytes, copyAudio = false) {
@@ -2278,4 +2342,4 @@ if (require.main === module) {
     server.keepAliveTimeout = 5000;
 }
 
-module.exports = { app, isSafeUrl, normalizeYouTubeUrl, isYouTubePlaylist, MetadataSemaphore };
+module.exports = { app, isSafeUrl, normalizeYouTubeUrl, isYouTubePlaylist, MetadataSemaphore, Semaphore };
