@@ -1718,7 +1718,7 @@ async function runFfmpeg(args, timeoutMessage, signal) {
 
 function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, title, artist, maxBytes, copyAudio = false) {
     const args = ['-y', '-i', audioPath];
-    const embedsCover = coverPath && ['mp3', 'm4a'].includes(format);
+    const embedsCover = coverPath && ['mp3', 'm4a', 'flac'].includes(format);
     if (embedsCover) args.push('-i', coverPath);
     args.push('-map', '0:a:0');
     if (embedsCover) args.push('-map', '1:v:0');
@@ -1733,7 +1733,7 @@ function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, tit
     if (title) args.push('-metadata', `title=${title}`);
     if (artist) args.push('-metadata', `artist=${artist}`);
     if (embedsCover) {
-        args.push('-c:v', 'mjpeg');
+        args.push('-c:v', format === 'flac' ? 'copy' : 'mjpeg');
         if (format === 'mp3') {
             args.push('-id3v2_version', '3', '-metadata:s:v', 'title=Album cover');
         }
@@ -1753,58 +1753,65 @@ function probeAudioCodec(filePath) {
     });
 }
 
-// attach album cover art to flac or ogg files
-function injectVorbisCoverArt(filePath, imgPath, format) {
+// attach album cover art to ogg files
+async function injectVorbisCoverArt(filePath, imgPath, format) {
+    if (format !== 'ogg') return false;
     if (!fs.existsSync(imgPath) || !fs.existsSync(filePath)) return false;
 
-    if (format === 'ogg') {
-        try {
-            const imgBuffer = fs.readFileSync(imgPath);
-            const mimeType = 'image/jpeg';
-            const mimeBuf = Buffer.from(mimeType, 'utf8');
-            const descBuf = Buffer.from('', 'utf8');
+    try {
+        const imgBuffer = fs.readFileSync(imgPath);
+        const mimeType = 'image/jpeg';
+        const mimeBuf = Buffer.from(mimeType, 'utf8');
+        const descBuf = Buffer.from('', 'utf8');
 
-            const picType = Buffer.alloc(4); picType.writeUInt32BE(3, 0);
-            const mimeLen = Buffer.alloc(4); mimeLen.writeUInt32BE(mimeBuf.length, 0);
-            const descLen = Buffer.alloc(4); descLen.writeUInt32BE(descBuf.length, 0);
-            const width = Buffer.alloc(4); width.writeUInt32BE(0, 0);
-            const height = Buffer.alloc(4); height.writeUInt32BE(0, 0);
-            const depth = Buffer.alloc(4); depth.writeUInt32BE(0, 0);
-            const colors = Buffer.alloc(4); colors.writeUInt32BE(0, 0);
-            const imgLen = Buffer.alloc(4); imgLen.writeUInt32BE(imgBuffer.length, 0);
+        const picType = Buffer.alloc(4); picType.writeUInt32BE(3, 0);
+        const mimeLen = Buffer.alloc(4); mimeLen.writeUInt32BE(mimeBuf.length, 0);
+        const descLen = Buffer.alloc(4); descLen.writeUInt32BE(descBuf.length, 0);
+        const width = Buffer.alloc(4); width.writeUInt32BE(0, 0);
+        const height = Buffer.alloc(4); height.writeUInt32BE(0, 0);
+        const depth = Buffer.alloc(4); depth.writeUInt32BE(0, 0);
+        const colors = Buffer.alloc(4); colors.writeUInt32BE(0, 0);
+        const imgLen = Buffer.alloc(4); imgLen.writeUInt32BE(imgBuffer.length, 0);
 
-            const block = Buffer.concat([picType, mimeLen, mimeBuf, descLen, descBuf, width, height, depth, colors, imgLen, imgBuffer]);
-            const base64Block = block.toString('base64');
+        const block = Buffer.concat([picType, mimeLen, mimeBuf, descLen, descBuf, width, height, depth, colors, imgLen, imgBuffer]);
+        const base64Block = block.toString('base64');
 
-            const readResult = spawnSync('vorbiscomment', ['-l', '-R', filePath], { timeout: 15000, windowsHide: true });
-            if (readResult.error || readResult.status !== 0) return false;
+        const stdout = await new Promise((resolve, reject) => {
+            const proc = spawn('vorbiscomment', ['-l', '-R', filePath], { windowsHide: true });
+            let out = '';
+            let timedOut = false;
+            const timer = setTimeout(() => { timedOut = true; proc.kill('SIGKILL'); }, 15000);
+            proc.stdout.on('data', d => { out += d.toString(); });
+            proc.on('error', err => { clearTimeout(timer); reject(err); });
+            proc.on('close', code => {
+                clearTimeout(timer);
+                if (timedOut || code !== 0) reject(new Error('vorbiscomment read failed'));
+                else resolve(out);
+            });
+        });
 
-            let comments = readResult.stdout.toString().split('\n');
-            comments = comments.filter(c => c && !c.startsWith('metadata_block_picture='));
-            comments.push(`metadata_block_picture=${base64Block}`);
+        let comments = stdout.split('\n');
+        comments = comments.filter(c => c && !c.startsWith('metadata_block_picture='));
+        comments.push(`metadata_block_picture=${base64Block}\n`);
 
-            const tempCommentsFile = path.join(WORK_DIR, `comments_${randomUUID()}.txt`);
-            fs.writeFileSync(tempCommentsFile, comments.join('\n'));
-            try {
-                const writeResult = spawnSync('vorbiscomment', ['-w', '-R', '-c', tempCommentsFile, filePath], { timeout: 15000, windowsHide: true });
-                return !writeResult.error && writeResult.status === 0;
-            } finally {
-                cleanupFiles([tempCommentsFile]);
-            }
-        } catch (e) {
-            return false;
-        }
-    } else if (format === 'flac') {
-        try {
-            spawnSync('metaflac', ['--remove', '--block-type=PICTURE', '--except-block-type=STREAMINFO', filePath], { timeout: 15000, windowsHide: true });
-            const spec = `3||Front Cover||${imgPath}`;
-            const writeResult = spawnSync('metaflac', [`--import-picture-from=${spec}`, filePath], { timeout: 15000, windowsHide: true });
-            return !writeResult.error && writeResult.status === 0;
-        } catch (e) {
-            return false;
-        }
+        await new Promise((resolve, reject) => {
+            const proc = spawn('vorbiscomment', ['-w', '-R', filePath], { windowsHide: true });
+            let timedOut = false;
+            const timer = setTimeout(() => { timedOut = true; proc.kill('SIGKILL'); }, 15000);
+            proc.on('error', err => { clearTimeout(timer); reject(err); });
+            proc.on('close', code => {
+                clearTimeout(timer);
+                if (timedOut || code !== 0) reject(new Error('vorbiscomment write failed'));
+                else resolve();
+            });
+            proc.stdin.write(comments.join('\n'));
+            proc.stdin.end();
+        });
+
+        return true;
+    } catch {
+        return false;
     }
-    return false;
 }
 
 // transcode the audio with ffmpeg and stream it directly to the user
@@ -1855,8 +1862,8 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
         if (signal?.aborted) throw new Error('Request cancelled.');
         if (fs.statSync(tempOutPath).size >= MAX_AUDIO_OUTPUT_BYTES) throw new Error('Audio output exceeds the allowed size.');
 
-        if (tempImgPath && fs.existsSync(tempOutPath) && (format === 'ogg' || format === 'flac')) {
-            injectVorbisCoverArt(tempOutPath, tempImgPath, format);
+        if (tempImgPath && fs.existsSync(tempOutPath) && format === 'ogg') {
+            await injectVorbisCoverArt(tempOutPath, tempImgPath, format);
         }
 
         Logger.success(`Encoding complete. Streaming ${format.toUpperCase()} to client`);
@@ -1956,8 +1963,8 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
         if (signal?.aborted) throw new Error('Request cancelled.');
         if (fs.statSync(tempOutPath).size >= zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
 
-        if (tempImgPath && fs.existsSync(tempOutPath) && (audioFormat === 'ogg' || audioFormat === 'flac')) {
-            injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
+        if (tempImgPath && fs.existsSync(tempOutPath) && audioFormat === 'ogg') {
+            await injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
         }
 
         if (fs.statSync(tempOutPath).size > zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
