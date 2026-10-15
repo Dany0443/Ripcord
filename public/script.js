@@ -1,12 +1,6 @@
 // frontend logic for ripcord
 // handles fetching track metadata, showing screens, and downloading audio
 
-// initialize theme immediately
-try {
-    const theme = localStorage.getItem('ripcord.theme');
-    if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
-} catch (e) { }
-
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
@@ -239,8 +233,13 @@ function initColourEngine() {
 }
 
 function isDarkNow() {
-    const chosen = root.dataset.theme;
-    if (chosen) return chosen === 'dark';
+    if (root.dataset.theme === 'dark') return true;
+    if (root.dataset.theme === 'light') return false;
+    try {
+        const stored = localStorage.getItem('ripcord.theme');
+        if (stored === 'dark') return true;
+        if (stored === 'light') return false;
+    } catch { /* ignore */ }
     return matchMedia('(prefers-color-scheme: dark)').matches;
 }
 
@@ -392,40 +391,39 @@ function resetSeed() {
     applyScheme();
 }
 
-// toggle between dark and light mode
-
-const THEMES = [
-    { id: 'auto', icon: 'brightness_auto', label: 'Theme: automatic' },
-    { id: 'light', icon: 'light_mode', label: 'Theme: light' },
-    { id: 'dark', icon: 'dark_mode', label: 'Theme: dark' }
-];
-
-function currentThemeId() {
-    return root.dataset.theme || 'auto';
-}
-
 function renderThemeButton() {
-    const t = THEMES.find(x => x.id === currentThemeId());
-    el.themeIcon.textContent = t.icon;
-    el.themeBtn.setAttribute('aria-label', t.label);
+    if (!root.dataset.theme) {
+        root.dataset.theme = isDarkNow() ? 'dark' : 'light';
+    }
+    const isDark = isDarkNow();
+    el.themeIcon.textContent = isDark ? 'dark_mode' : 'light_mode';
+    const label = isDark ? 'Switch to light mode' : 'Switch to dark mode';
+    el.themeBtn.setAttribute('aria-label', label);
+    el.themeBtn.setAttribute('title', label);
 }
 
 el.themeBtn.addEventListener('click', () => {
-    const next = THEMES[(THEMES.findIndex(x => x.id === currentThemeId()) + 1) % THEMES.length];
-    if (next.id === 'auto') {
-        delete root.dataset.theme;
-        try { localStorage.removeItem('ripcord.theme'); } catch { /* ignore */ }
-    } else {
-        root.dataset.theme = next.id;
-        try { localStorage.setItem('ripcord.theme', next.id); } catch { /* ignore */ }
-    }
+    const next = isDarkNow() ? 'light' : 'dark';
+    root.dataset.theme = next;
+    try {
+        localStorage.setItem('ripcord.theme', next);
+    } catch { /* ignore */ }
     renderThemeButton();
     applyScheme();
-    toast(next.label.replace('Theme: ', 'Theme set to ') + '.');
+    toast(next === 'dark' ? 'Theme set to dark.' : 'Theme set to light.');
 });
 
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-    if (!root.dataset.theme) applyScheme();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+    let hasStoredChoice = false;
+    try {
+        const stored = localStorage.getItem('ripcord.theme');
+        hasStoredChoice = stored === 'light' || stored === 'dark';
+    } catch { /* ignore */ }
+    if (!hasStoredChoice) {
+        root.dataset.theme = e.matches ? 'dark' : 'light';
+        renderThemeButton();
+        applyScheme();
+    }
 });
 
 // show a small notification toast at the bottom

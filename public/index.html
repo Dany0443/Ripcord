@@ -15,6 +15,17 @@
     <meta property="og:type" content="website">
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 
+    <script>
+        try {
+            const t = localStorage.getItem('ripcord.theme');
+            document.documentElement.dataset.theme = (t === 'light' || t === 'dark')
+                ? t
+                : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        } catch {
+            document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+    </script>
+
     <link rel="stylesheet" href="styles.css">
 
     <script defer src="script.js"></script>
@@ -35,8 +46,8 @@
             <span class="brand__name">Ripcord</span>
         </a>
         <div class="top-bar__actions">
-            <button class="icon-btn" id="theme-btn" type="button" aria-label="Theme: automatic" title="Theme">
-                <span class="icon" id="theme-icon" aria-hidden="true">brightness_auto</span>
+            <button class="icon-btn" id="theme-btn" type="button" aria-label="Switch theme" title="Switch theme">
+                <span class="icon" id="theme-icon" aria-hidden="true">dark_mode</span>
             </button>
             <button class="icon-btn" id="about-btn" type="button" aria-label="About Ripcord" title="About">
                 <span class="icon" aria-hidden="true">info</span>
