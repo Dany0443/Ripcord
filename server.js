@@ -7,7 +7,6 @@ const os = require('os');
 const { randomUUID } = require('node:crypto');
 const { Transform } = require('node:stream');
 const { spawn, spawnSync } = require('child_process');
-const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
@@ -32,7 +31,7 @@ function findExecutableInPath(command) {
 
 // Resolve directly from PATH so broken local `which` shims cannot hide system FFmpeg.
 const ffmpegPath = findExecutableInPath('ffmpeg') || ffmpegStatic || 'ffmpeg';
-ffmpeg.setFfmpegPath(ffmpegPath);
+const ffprobePath = findExecutableInPath('ffprobe') || 'ffprobe';
 
 // make sure yt-dlp is installed and in the system path
 const checkYtdlp = spawnSync('yt-dlp', ['--version']);
@@ -1717,7 +1716,7 @@ async function runFfmpeg(args, timeoutMessage, signal) {
 }
 
 function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, title, artist, maxBytes, copyAudio = false) {
-    const args = ['-y', '-i', audioPath];
+    const args = ['-hide_banner', '-loglevel', 'error', '-nostats', '-y', '-i', audioPath];
     const embedsCover = coverPath && ['mp3', 'm4a', 'flac'].includes(format);
     if (embedsCover) args.push('-i', coverPath);
     args.push('-map', '0:a:0');
@@ -1733,7 +1732,7 @@ function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, tit
     if (title) args.push('-metadata', `title=${title}`);
     if (artist) args.push('-metadata', `artist=${artist}`);
     if (embedsCover) {
-        args.push('-c:v', format === 'flac' ? 'copy' : 'mjpeg');
+        args.push('-c:v', 'copy');
         if (format === 'mp3') {
             args.push('-id3v2_version', '3', '-metadata:s:v', 'title=Album cover');
         }
@@ -1745,10 +1744,25 @@ function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, tit
 
 function probeAudioCodec(filePath) {
     return new Promise(resolve => {
-        ffmpeg.ffprobe(filePath, (error, metadata) => {
-            if (error) return resolve(null);
-            const audioStream = metadata?.streams?.find(stream => stream.codec_type === 'audio');
-            resolve(audioStream?.codec_name || null);
+        const proc = spawn(ffprobePath, [
+            '-v', 'error',
+            '-select_streams', 'a:0',
+            '-show_entries', 'stream=codec_name',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            filePath
+        ], { windowsHide: true });
+
+        let output = '';
+        const timer = setTimeout(() => proc.kill('SIGKILL'), 10000);
+        proc.stdout.on('data', data => { output += data.toString(); });
+        proc.on('error', () => {
+            clearTimeout(timer);
+            resolve(null);
+        });
+        proc.on('close', code => {
+            clearTimeout(timer);
+            if (code === 0) resolve(output.trim() || null);
+            else resolve(null);
         });
     });
 }
