@@ -2072,7 +2072,6 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
             try {
                 const handoffQueue = new AsyncBoundedQueue(4);
-                const encodedResults = new Array(tracks.length);
                 let nextTrack = 0;
                 const downloadWorker = async () => {
                     while (!signal.aborted) {
@@ -2093,8 +2092,16 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                         const downloaded = await handoffQueue.shift();
                         if (!downloaded) return;
                         const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal, report);
-                        if (signal.aborted && result?.filePath) cleanupFiles([result.filePath]);
-                        else if (result) encodedResults[downloaded.index] = result;
+                        if (signal.aborted) {
+                            if (result?.filePath) cleanupFiles([result.filePath]);
+                            return;
+                        }
+                        if (result?.filePath) {
+                            trackFilePaths.add(result.filePath);
+                            archiveFilePaths.set(result.name, result.filePath);
+                            archive.file(result.filePath, { name: result.name });
+                            addedTracks++;
+                        }
                     }
                 };
 
@@ -2103,18 +2110,6 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 await Promise.all(downloadWorkers);
                 handoffQueue.close();
                 await Promise.all(encodeWorkers);
-
-                for (const result of encodedResults) {
-                    if (!result?.filePath) continue;
-                    if (signal.aborted) {
-                        cleanupFiles([result.filePath]);
-                        continue;
-                    }
-                    trackFilePaths.add(result.filePath);
-                    archiveFilePaths.set(result.name, result.filePath);
-                    archive.file(result.filePath, { name: result.name });
-                    addedTracks++;
-                }
 
                 if (signal.aborted) throw new Error('Request cancelled.');
                 if (addedTracks === 0) throw new Error('No tracks could be processed.');
