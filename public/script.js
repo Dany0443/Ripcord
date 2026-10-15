@@ -125,6 +125,15 @@ function tidyTitle(title) {
     return cleaned || title;
 }
 
+function extractSingleVideoId(parsed) {
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    let id = null;
+    if (host === 'youtu.be') id = parsed.pathname.slice(1);
+    else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
+    else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
+    return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
+}
+
 function normaliseUrl(raw) {
     let value = (raw || '').trim();
     if (!value) return null;
@@ -141,23 +150,22 @@ function normaliseUrl(raw) {
     if (!ok) return null;
 
     if (['youtube.com', 'music.youtube.com', 'm.youtube.com', 'youtu.be'].some(h => host === h || host.endsWith('.' + h))) {
+        parsed.hash = '';
         const list = parsed.searchParams.get('list');
-        const isRadio = (list && list.toUpperCase().startsWith('RD')) ||
-            (list && list.toUpperCase().startsWith('UL')) ||
-            parsed.searchParams.get('start_radio') === '1';
 
-        if (isRadio) {
-            parsed.searchParams.delete('list');
-            parsed.searchParams.delete('start_radio');
-            parsed.searchParams.delete('index');
-
-            if (parsed.pathname === '/playlist' && list) {
-                const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
-                if (match) {
-                    parsed.pathname = '/watch';
-                    parsed.searchParams.set('v', match[1]);
-                }
+        if (parsed.pathname === '/playlist' && list) {
+            const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
+            if (match) {
+                parsed.pathname = '/watch';
+                parsed.searchParams.set('v', match[1]);
             }
+        }
+
+        if (extractSingleVideoId(parsed)) {
+            parsed.searchParams.delete('list');
+            parsed.searchParams.delete('index');
+            parsed.searchParams.delete('start_radio');
+            parsed.searchParams.delete('pp');
         }
     }
 
@@ -600,10 +608,11 @@ async function submitUrl() {
         const res = await fetch(`/api/fetch-info?url=${encodeURIComponent(url)}`);
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again.');
-        state.url = url;
+        state.url = data.url || url;
+        el.url.value = state.url;
         state.info = data;
         showOptions();
-        remember(url, data);
+        remember(state.url, data);
     } catch (err) {
         setFieldError(err.message);
     } finally {
@@ -769,6 +778,10 @@ function startDownload() {
     const name = safeName(el.filename.value) || suggestedName() || 'ripcord';
 
     const params = new URLSearchParams({ url: state.url, bitrate: String(bitrate), format: fmt, filename: name });
+    if (!isCollection && nameTouched) {
+        const customTitle = el.filename.value.trim().slice(0, 120);
+        if (customTitle) params.set('title', customTitle);
+    }
     const saveName = isCollection ? `${safeName(info.title) || 'ripcord'}.zip` : `${name}.${fmt}`;
 
     el.workingTitle.textContent = isCollection ? 'Packing up your collection' : 'Pulling the sound out';

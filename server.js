@@ -1295,21 +1295,29 @@ function cleanupFiles(files) {
     });
 }
 
+function extractSingleVideoId(parsed) {
+    const host = parsed.hostname.toLowerCase();
+    let id = null;
+    if (host === 'youtu.be') id = parsed.pathname.slice(1);
+    else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
+    else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
+    return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
+}
+
 // grab the 11 character id from a youtube link
 function getYouTubeVideoId(url) {
     try {
-        const parsed = new URL(url);
-        const host = parsed.hostname.toLowerCase();
-        let id = null;
-        if (host === 'youtu.be') id = parsed.pathname.slice(1);
-        else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
-        else if (parsed.pathname === '/playlist') {
+        let value = typeof url === 'string' ? url.trim() : '';
+        if (!value) return null;
+        const parsed = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+        const singleId = extractSingleVideoId(parsed);
+        if (singleId) return singleId;
+        if (parsed.pathname === '/playlist') {
             const list = parsed.searchParams.get('list');
             const match = list?.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
-            if (match) id = match[1];
+            if (match) return match[1];
         }
-        else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
-        return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
+        return null;
     } catch (e) {
         return null;
     }
@@ -1317,7 +1325,9 @@ function getYouTubeVideoId(url) {
 
 function isYouTubeUrl(url) {
     try {
-        const parsed = new URL(url);
+        let value = typeof url === 'string' ? url.trim() : '';
+        if (!value) return false;
+        const parsed = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
         return YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase());
     } catch (e) {
         return false;
@@ -1326,28 +1336,29 @@ function isYouTubeUrl(url) {
 
 function normalizeYouTubeUrl(url) {
     try {
-        const parsed = new URL(url);
+        let value = typeof url === 'string' ? url.trim() : '';
+        if (!value) return url;
+        const hasProtocol = /^https?:\/\//i.test(value);
+        const parsed = new URL(hasProtocol ? value : `https://${value}`);
         const host = parsed.hostname.toLowerCase();
         if (!YOUTUBE_HOSTS.has(host)) return url;
 
         const list = parsed.searchParams.get('list');
-        const isRadio = (list && list.toUpperCase().startsWith('RD')) ||
-            (list && list.toUpperCase().startsWith('UL')) ||
-            parsed.searchParams.get('start_radio') === '1';
-
-        if (isRadio) {
-            parsed.searchParams.delete('list');
-            parsed.searchParams.delete('start_radio');
-            parsed.searchParams.delete('index');
-
-            if (parsed.pathname === '/playlist' && list) {
-                const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
-                if (match) {
-                    parsed.pathname = '/watch';
-                    parsed.searchParams.set('v', match[1]);
-                }
+        if (parsed.pathname === '/playlist' && list) {
+            const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
+            if (match) {
+                parsed.pathname = '/watch';
+                parsed.searchParams.set('v', match[1]);
             }
         }
+
+        if (extractSingleVideoId(parsed)) {
+            parsed.searchParams.delete('list');
+            parsed.searchParams.delete('index');
+            parsed.searchParams.delete('start_radio');
+            parsed.searchParams.delete('pp');
+        }
+
         return parsed.href;
     } catch {
         return url;
@@ -1356,18 +1367,22 @@ function normalizeYouTubeUrl(url) {
 
 function isYouTubePlaylist(url) {
     try {
-        const parsed = new URL(url);
-        if (!YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase())) return false;
+        let value = typeof url === 'string' ? url.trim() : '';
+        if (!value) return false;
+        const parsed = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+        const host = parsed.hostname.toLowerCase();
+        if (!YOUTUBE_HOSTS.has(host)) return false;
+
+        if (extractSingleVideoId(parsed)) {
+            return false;
+        }
 
         const list = parsed.searchParams.get('list');
-        if (!list && parsed.pathname !== '/playlist') return false;
-
-        // Auto-generated YouTube Mixes / Radios (starting with RD or UL) are dynamic recommendation feeds, not downloadable static playlists.
         if (list && (list.toUpperCase().startsWith('RD') || list.toUpperCase().startsWith('UL') || parsed.searchParams.get('start_radio') === '1')) {
             return false;
         }
 
-        return parsed.pathname === '/playlist' || Boolean(list);
+        return (parsed.pathname === '/playlist' || Boolean(list)) && Boolean(list);
     } catch (e) {
         return false;
     }
@@ -2034,7 +2049,7 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
 }
 
 // worker function that processes the actual download request
-async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId = null) {
+async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId = null, customTitle = '') {
     try {
         Logger.info(`Task started (${audioFormat.toUpperCase()})`);
         if (signal.aborted) return;
@@ -2056,7 +2071,8 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}.${audioFormat}"`);
             res.setHeader('Content-Type', mimeType);
             const info = await getYoutubeInfo(url, signal);
-            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, info.title, info.author, signal);
+            const trackTitle = customTitle || info.title;
+            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal);
             return;
         }
 
@@ -2067,7 +2083,8 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             const spotifyData = await getSpotifyData(url, signal);
             const track = spotifyData.tracks[0];
             const matchUrl = await findSpotifyMatch(track, signal);
-            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, track.title, track.artist, signal);
+            const trackTitle = customTitle || track.title;
+            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal);
             return;
         }
 
@@ -2239,7 +2256,8 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                     title: ytData.name,
                     trackCount: ytData.tracks.length,
                     tracks: ytData.tracks.map(t => ({ title: t.title, artist: t.artist || '' })),
-                    thumbnail: ytData.tracks[0]?.thumbnail || ''
+                    thumbnail: ytData.tracks[0]?.thumbnail || '',
+                    url
                 });
             } finally {
                 release?.();
@@ -2251,7 +2269,8 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                 type: 'track',
                 title: info.title,
                 artist: info.author,
-                thumbnail: info.thumbnail
+                thumbnail: info.thumbnail,
+                url
             });
         } else if (spotifyLinkDetails(url)?.type === 'track') {
             const spotifyData = await getSpotifyData(url, controller.signal);
@@ -2260,7 +2279,8 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                 type: 'track',
                 title: track.title,
                 artist: track.artist,
-                thumbnail: track.thumbnail
+                thumbnail: track.thumbnail,
+                url
             });
         } else if (spotifyLinkDetails(url)) {
             const spotifyData = await getSpotifyData(url, controller.signal);
@@ -2269,7 +2289,8 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                 title: spotifyData.name,
                 trackCount: spotifyData.tracks.length,
                 tracks: spotifyData.tracks.map(t => ({ title: t.title, artist: t.artist === 'Unknown Artist' ? '' : t.artist })),
-                thumbnail: spotifyData.thumbnail
+                thumbnail: spotifyData.thumbnail,
+                url
             });
         } else {
             return res.status(400).json({ error: 'Unsupported URL. Please provide a Spotify or YouTube link.' });
@@ -2286,6 +2307,7 @@ app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
     const bitrate = req.query.bitrate;
     const filename = req.query.filename;
     const format = req.query.format;
+    const title = req.query.title;
         const audioBitrate = bitrate === undefined
             ? 128
             : typeof bitrate === 'string' && /^\d{2,3}$/.test(bitrate) ? Number(bitrate) : NaN;
@@ -2303,16 +2325,20 @@ app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
     if (filename !== undefined && (typeof filename !== 'string' || filename.length > 120)) {
         return res.status(400).json({ error: 'Filename is invalid or too long.' });
     }
+    if (title !== undefined && (typeof title !== 'string' || title.length > 120)) {
+        return res.status(400).json({ error: 'Title is invalid or too long.' });
+    }
 
     const parsedUrl = new URL(rawUrl);
     parsedUrl.hash = '';
     const url = normalizeYouTubeUrl(parsedUrl.href);
     const safeFilename = sanitizeFilename(filename);
+    const customTitle = title !== undefined ? safeMetadataText(title) : '';
 
     const jobId = typeof req.query.job === 'string' && JOB_ID_PATTERN.test(req.query.job) ? req.query.job : null;
 
     const accepted = downloadQueue.addTask(
-        signal => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId),
+        signal => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId, customTitle),
         res
     );
     if (!accepted) {

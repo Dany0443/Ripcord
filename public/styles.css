@@ -138,7 +138,7 @@
   --spring-effects: linear(0, 0.033 3%, 0.11 6%, 0.207 9%, 0.31 13%, 0.41 16%, 0.503 19%, 0.585 22%, 0.657 25%, 0.719 28%, 0.771 31%, 0.814 34%, 0.85 38%, 0.88 41%, 0.904 44%, 0.923 47%, 0.939 50%, 0.952 53%, 0.962 56%, 0.97 59%, 0.976 63%, 0.981 66%, 0.985 69%, 0.988 72%, 0.991 75%, 0.993 78%, 0.994 81%, 0.996 84%, 0.997 88%, 0.997 91%, 0.998 94%, 0.998 97%, 1);
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
-  --theme-fade: 350ms;
+  --theme-fade: 1000ms;
 
   /* font sizes and line heights */
   --font: "Roboto Flex", "Roboto Flex Fallback", system-ui, -apple-system, "Segoe UI", sans-serif;
