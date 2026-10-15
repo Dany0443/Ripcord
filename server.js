@@ -103,8 +103,8 @@ const checkAria2c = spawnSync('aria2c', ['--version']);
 const aria2cAvailable = checkAria2c.status === 0;
 Logger.info(`aria2c: ${aria2cAvailable ? 'available' : 'not installed'}${YTDLP_USE_ARIA2C && aria2cAvailable ? ' (enabled)' : ''}`);
 
-function cleanupStaleWorkFiles() {
-    const staleBefore = Date.now() - 6 * 60 * 60 * 1000;
+function sweepWorkDir(staleOnly = true) {
+    const staleBefore = staleOnly ? Date.now() - 6 * 60 * 60 * 1000 : Infinity;
     const prefixes = ['ripcord_', 'out_', 'track_', 'cover_', 'tagged_', 'comments_'];
     let removed = 0;
     try {
@@ -112,7 +112,7 @@ function cleanupStaleWorkFiles() {
             if (!entry.isFile() || !prefixes.some(prefix => entry.name.startsWith(prefix))) continue;
             const filePath = path.join(WORK_DIR, entry.name);
             try {
-                if (fs.statSync(filePath).mtimeMs < staleBefore) {
+                if (!staleOnly || fs.statSync(filePath).mtimeMs < staleBefore) {
                     fs.unlinkSync(filePath);
                     removed++;
                 }
@@ -123,9 +123,10 @@ function cleanupStaleWorkFiles() {
     } catch (error) {
         Logger.warn(`Unable to sweep work directory ${WORK_DIR}: ${error.message}`);
     }
-    Logger.info(`Temporary file sweep removed ${removed} stale file(s) from ${WORK_DIR}`);
+    Logger.info(`Temporary file sweep removed ${removed} ${staleOnly ? 'stale ' : ''}file(s) from ${WORK_DIR}`);
 }
 
+const cleanupStaleWorkFiles = () => sweepWorkDir(true);
 cleanupStaleWorkFiles();
 
 // optional cookies file if youtube starts blocking downloads
@@ -141,9 +142,12 @@ class DownloadQueue {
         this.maxQueued = maxQueued;
         this.running = 0;
         this.queue = [];
+        this.activeEntries = new Set();
+        this.shuttingDown = false;
     }
 
     addTask(task, res) {
+        if (this.shuttingDown) return false;
         if (this.running >= this.concurrency && this.queue.length >= this.maxQueued) return false;
 
         const entry = { task, res, controller: new AbortController(), started: false };
@@ -160,14 +164,17 @@ class DownloadQueue {
     }
 
     process() {
+        if (this.shuttingDown) return;
         if (this.running >= this.concurrency || this.queue.length === 0) return;
 
         this.running++;
         const entry = this.queue.shift();
         entry.started = true;
+        this.activeEntries.add(entry);
 
         if (entry.controller.signal.aborted || entry.res.destroyed) {
             entry.res.removeListener('close', entry.onClose);
+            this.activeEntries.delete(entry);
             this.running--;
             this.process();
             return;
@@ -177,9 +184,30 @@ class DownloadQueue {
             .catch(err => Logger.error(`[Queue] Task failed: ${err.message}`))
             .finally(() => {
                 entry.res.removeListener('close', entry.onClose);
+                this.activeEntries.delete(entry);
                 this.running--;
                 this.process();
             });
+    }
+
+    stopAccepting() {
+        this.shuttingDown = true;
+        while (this.queue.length > 0) {
+            const entry = this.queue.shift();
+            entry.res.removeListener('close', entry.onClose);
+            entry.controller.abort();
+            if (!entry.res.headersSent) {
+                entry.res.status(503).json({ error: 'Server is shutting down.' });
+            } else if (!entry.res.destroyed) {
+                entry.res.destroy();
+            }
+        }
+    }
+
+    abortAll() {
+        for (const entry of this.activeEntries) {
+            entry.controller.abort();
+        }
     }
 }
 
@@ -346,6 +374,15 @@ const app = express();
 
 app.disable('x-powered-by');
 app.set('trust proxy', TRUST_PROXY_HOPS);
+
+let isShuttingDown = false;
+app.use((req, res, next) => {
+    if (isShuttingDown) {
+        res.setHeader('Connection', 'close');
+        return res.status(503).json({ error: 'Server is shutting down.' });
+    }
+    next();
+});
 app.use(helmet({
     contentSecurityPolicy: {
         directives: {
@@ -2347,15 +2384,84 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Internal server error.' });
 });
 
+process.on('unhandledRejection', (reason) => {
+    Logger.error(`Unhandled Rejection: ${reason instanceof Error ? reason.stack || reason.message : reason}`);
+});
+
+process.on('uncaughtException', (err) => {
+    Logger.error(`Uncaught Exception: ${err.stack || err.message}`);
+    gracefulShutdown('uncaughtException');
+});
+
+let serverInstance = null;
+let shutdownPromise = null;
+
+function gracefulShutdown(signal) {
+    if (shutdownPromise) return shutdownPromise;
+    Logger.info(`Received ${signal}. Initiating graceful shutdown...`);
+    isShuttingDown = true;
+
+    shutdownPromise = (async () => {
+        downloadQueue.stopAccepting();
+
+        if (serverInstance) {
+            await new Promise((resolve) => {
+                serverInstance.close((err) => {
+                    if (err) Logger.warn(`Error closing HTTP server: ${err.message}`);
+                    else Logger.info('HTTP server closed.');
+                    resolve();
+                });
+            });
+        }
+
+        downloadQueue.abortAll();
+
+        const drainStart = Date.now();
+        while (downloadQueue.running > 0 && Date.now() - drainStart < 5000) {
+            await new Promise(r => setTimeout(r, 100));
+        }
+
+        sweepWorkDir(false);
+
+        Logger.success('Graceful shutdown complete.');
+        if (signal !== 'test') {
+            process.exit(signal === 'uncaughtException' ? 1 : 0);
+        }
+    })();
+
+    const forceExitTimeout = setTimeout(() => {
+        Logger.error('Graceful shutdown timed out, forcing exit.');
+        sweepWorkDir(false);
+        process.exit(1);
+    }, 10000);
+    forceExitTimeout.unref();
+
+    return shutdownPromise;
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 if (require.main === module) {
     const PORT = positiveIntegerEnv('PORT', 5224, 65535);
-    const server = app.listen(PORT, '0.0.0.0', () => {
+    serverInstance = app.listen(PORT, '0.0.0.0', () => {
         Logger.success(`Ripcord server live at http://localhost:${PORT}`);
         Logger.info('Ready for requests under domain');
     });
-    server.headersTimeout = 15000;
-    server.requestTimeout = 30000;
-    server.keepAliveTimeout = 5000;
+    serverInstance.headersTimeout = 15000;
+    serverInstance.requestTimeout = 30000;
+    serverInstance.keepAliveTimeout = 5000;
 }
 
-module.exports = { app, isSafeUrl, normalizeYouTubeUrl, isYouTubePlaylist, MetadataSemaphore, Semaphore };
+module.exports = {
+    app,
+    isSafeUrl,
+    normalizeYouTubeUrl,
+    isYouTubePlaylist,
+    MetadataSemaphore,
+    Semaphore,
+    DownloadQueue,
+    sweepWorkDir,
+    cleanupStaleWorkFiles,
+    gracefulShutdown
+};
