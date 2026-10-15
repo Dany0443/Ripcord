@@ -525,6 +525,7 @@ button {
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
   cursor: pointer;
+  text-decoration: none;
   transition: border-radius 0.5s var(--spring-spatial);
 }
 
