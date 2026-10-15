@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "check:icons": "pipx run --spec \"fonttools[brotli,woff]\" python scripts/check-icons.py"
   },
   "keywords": [
     "ripcord",

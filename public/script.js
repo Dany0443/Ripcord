@@ -219,39 +219,26 @@ const TOKENS = [
     'inverse-surface', 'inverse-on-surface', 'inverse-primary'
 ];
 
-const TRANSITION_TOKENS = [
-    'primary', 'primary-container', 'secondary-container',
-    'tertiary-container', 'surface-container', 'surface'
-];
-
 let currentSeed = null;
 
-function initColourEngine() {
-    // register key color properties so theme and cover art changes transition smoothly
-    for (const name of TRANSITION_TOKENS) {
-        try {
-            CSS.registerProperty({ name: `--md-sys-color-${name}`, syntax: '<color>', inherits: true, initialValue: 'transparent' });
-        } catch { /* already registered */ }
+function transitionTheme(updateFn) {
+    if (document.startViewTransition && !reduceMotion.matches) {
+        root.dataset.themeTransition = 'true';
+        const vt = document.startViewTransition(updateFn);
+        vt.finished.finally(() => {
+            delete root.dataset.themeTransition;
+        });
+    } else {
+        updateFn();
     }
+}
+
+function initColourEngine() {
     applyScheme();
-    // enable transitions only on core visual tokens after the page paints
-    requestAnimationFrame(() => {
-        setTimeout(() => {
-            root.style.transition = TRANSITION_TOKENS
-                .map(n => `--md-sys-color-${n} 0.5s ease`).join(', ');
-        }, 150);
-    });
 }
 
 function isDarkNow() {
-    if (root.dataset.theme === 'dark') return true;
-    if (root.dataset.theme === 'light') return false;
-    try {
-        const stored = localStorage.getItem('ripcord.theme');
-        if (stored === 'dark') return true;
-        if (stored === 'light') return false;
-    } catch { /* ignore */ }
-    return matchMedia('(prefers-color-scheme: dark)').matches;
+    return root.dataset.theme === 'dark';
 }
 
 function applyScheme() {
@@ -389,23 +376,25 @@ function extractDominantColor(img) {
 async function seedFromCover() {
     try {
         if (!el.coverImg.complete || !el.coverImg.naturalWidth) await el.coverImg.decode();
-        currentSeed = extractDominantColor(el.coverImg);
+        const nextSeed = extractDominantColor(el.coverImg);
+        transitionTheme(() => {
+            currentSeed = nextSeed;
+            applyScheme();
+        });
     } catch {
-        currentSeed = null;
+        resetSeed();
     }
-    applyScheme();
 }
 
 function resetSeed() {
     if (!currentSeed) return;
-    currentSeed = null;
-    applyScheme();
+    transitionTheme(() => {
+        currentSeed = null;
+        applyScheme();
+    });
 }
 
 function renderThemeButton() {
-    if (!root.dataset.theme) {
-        root.dataset.theme = isDarkNow() ? 'dark' : 'light';
-    }
     const isDark = isDarkNow();
     el.themeIcon.textContent = isDark ? 'dark_mode' : 'light_mode';
     const label = isDark ? 'Switch to light mode' : 'Switch to dark mode';
@@ -415,12 +404,15 @@ function renderThemeButton() {
 
 el.themeBtn.addEventListener('click', () => {
     const next = isDarkNow() ? 'light' : 'dark';
-    root.dataset.theme = next;
-    try {
-        localStorage.setItem('ripcord.theme', next);
-    } catch { /* ignore */ }
-    renderThemeButton();
-    applyScheme();
+    transitionTheme(() => {
+        root.dataset.theme = next;
+        try {
+            localStorage.setItem('ripcord.theme', next);
+        } catch { /* ignore */ }
+        renderThemeButton();
+        applyScheme();
+        syncThemeColorMeta();
+    });
     toast(next === 'dark' ? 'Theme set to dark.' : 'Theme set to light.');
 });
 
@@ -431,9 +423,12 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
         hasStoredChoice = stored === 'light' || stored === 'dark';
     } catch { /* ignore */ }
     if (!hasStoredChoice) {
-        root.dataset.theme = e.matches ? 'dark' : 'light';
-        renderThemeButton();
-        applyScheme();
+        transitionTheme(() => {
+            root.dataset.theme = e.matches ? 'dark' : 'light';
+            renderThemeButton();
+            applyScheme();
+            syncThemeColorMeta();
+        });
     }
 });
 
@@ -508,17 +503,6 @@ function go(stage, dir = 'forward') {
         after();
     }
     setSpinSpeed(stage === 'working' ? 4 : 1);
-}
-
-// change the greeting based on the time of day
-
-function setGreeting() {
-    const h = new Date().getHours();
-    let text = 'Good evening';
-    if (h < 5) text = 'Up late? Same';
-    else if (h < 12) text = 'Good morning';
-    else if (h < 18) text = 'Good afternoon';
-    el.greeting.textContent = text;
 }
 
 // logic for the search input box and paste button
@@ -1102,7 +1086,6 @@ el.againBtn.addEventListener('click', () => {
 
 // start everything up when the page loads
 
-setGreeting();
 renderThemeButton();
 renderRecent();
 syncPasteButton();
@@ -1110,12 +1093,6 @@ setupSpin();
 syncThemeColorMeta();
 initColourEngine();
 
-// Hold intro (.rise) animations until document.fonts.ready (or 1s timeout cap)
-const fontsReadyPromise = document.fonts ? document.fonts.ready : Promise.resolve();
-const fontsTimeoutPromise = new Promise(resolve => setTimeout(resolve, 1000));
-Promise.race([fontsReadyPromise, fontsTimeoutPromise]).then(() => {
-    document.documentElement.classList.add('fonts-ready');
-    setTimeout(() => {
-        $('#stage')?.classList.remove('rise');
-    }, 800);
-});
+setTimeout(() => {
+    $('#stage')?.classList.remove('rise');
+}, 1200);

@@ -87,36 +87,6 @@
   src: url('/assets/fonts/material-symbols-rounded.woff2') format('woff2');
 }
 
-@property --md-sys-color-primary {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #8b4f25;
-}
-
-@property --md-sys-color-primary-container {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #ffdbc8;
-}
-
-@property --md-sys-color-secondary-container {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #ffdbc8;
-}
-
-@property --md-sys-color-tertiary-container {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #e7e5ac;
-}
-
-@property --md-sys-color-surface-container {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #fcebe2;
-}
-
 :root {
   color-scheme: light dark;
 
@@ -347,7 +317,6 @@ button {
   z-index: 0;
   overflow: hidden;
   pointer-events: none;
-  contain: strict;
 }
 
 .blob {
@@ -356,10 +325,12 @@ button {
   aspect-ratio: 1;
   opacity: 0.55;
   translate: calc(var(--px, 0) * var(--k)) calc(var(--py, 0) * var(--k));
-  transition: translate 1s var(--ease-standard), background-color 0.8s var(--ease-standard), opacity 0.6s var(--ease-standard);
-  animation: drift 28s ease-in-out infinite;
-  will-change: transform, translate;
-  contain: layout paint style;
+  transition: translate 1s var(--ease-standard);
+  pointer-events: none;
+}
+
+.blob path {
+  fill: currentColor;
 }
 
 .blob--1 {
@@ -367,8 +338,8 @@ button {
   width: min(54vw, 660px);
   left: -14vw;
   top: -18vh;
-  border-radius: 60% 40% 55% 45% / 55% 45% 60% 40%;
-  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-primary-container);
+  animation: drift-1 32s ease-in-out infinite;
 }
 
 .blob--2 {
@@ -376,9 +347,8 @@ button {
   width: min(44vw, 540px);
   right: -12vw;
   top: 20vh;
-  border-radius: 45% 55% 60% 40% / 50% 60% 40% 50%;
-  background: var(--md-sys-color-tertiary-container);
-  animation-delay: -6s;
+  color: var(--md-sys-color-tertiary-container);
+  animation: drift-2 26s ease-in-out infinite -5s;
 }
 
 .blob--3 {
@@ -386,19 +356,46 @@ button {
   width: min(38vw, 440px);
   left: 28vw;
   bottom: -26vh;
-  border-radius: 55% 45% 40% 60% / 45% 55% 55% 45%;
-  background: var(--md-sys-color-secondary-container);
-  animation-delay: -12s;
+  color: var(--md-sys-color-secondary-container);
+  animation: drift-3 36s ease-in-out infinite -10s;
 }
 
-@keyframes drift {
-  0%,
-  100% {
-    transform: translate(0, 0) rotate(0deg) scale(1);
+@keyframes drift-1 {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1, 1);
   }
-
+  25% {
+    transform: translate3d(2.5vw, -2vh, 0) rotate(85deg) scale(1.08, 0.94);
+  }
   50% {
-    transform: translate(3vw, -2vh) rotate(24deg) scale(1.05);
+    transform: translate3d(-1.5vw, 2.5vh, 0) rotate(180deg) scale(0.95, 1.06);
+  }
+  75% {
+    transform: translate3d(2vw, 1.5vh, 0) rotate(265deg) scale(1.04, 0.96);
+  }
+}
+
+@keyframes drift-2 {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1, 1);
+  }
+  33% {
+    transform: translate3d(-3vw, 2vh, 0) rotate(-110deg) scale(0.94, 1.08);
+  }
+  66% {
+    transform: translate3d(2vw, -2.5vh, 0) rotate(-230deg) scale(1.06, 0.95);
+  }
+}
+
+@keyframes drift-3 {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1, 1);
+  }
+  30% {
+    transform: translate3d(2vw, 2vh, 0) rotate(100deg) scale(1.05, 0.96);
+  }
+  70% {
+    transform: translate3d(-2.5vw, -1.5vh, 0) rotate(240deg) scale(0.96, 1.05);
   }
 }
 
@@ -615,14 +612,14 @@ button {
   }
 }
 
-:root:not(.fonts-ready) .rise {
-  animation-play-state: paused;
-  opacity: 0;
+.rise {
+  --font-delay: 0.8s;
+  animation: rise 0.5s var(--spring-spatial) backwards;
+  animation-delay: calc(var(--font-delay) + var(--i, 0) * 45ms);
 }
 
-.rise {
-  animation: rise 0.5s var(--spring-spatial) backwards;
-  animation-delay: calc(var(--i, 0) * 45ms);
+:root.fonts-ready .rise {
+  --font-delay: 0s;
 }
 
 @keyframes rise {
@@ -1879,6 +1876,29 @@ dialog::backdrop {
   animation: none;
 }
 
+/* theme & cover-art view transitions: full-page smooth crossfade */
+html[data-theme-transition] .stage {
+  view-transition-name: none;
+}
+
+html[data-theme-transition]::view-transition-old(root) {
+  animation: theme-fade-out 0.25s ease-out both;
+}
+
+html[data-theme-transition]::view-transition-new(root) {
+  animation: theme-fade-in 0.25s ease-in both;
+}
+
+@keyframes theme-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes theme-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 ::view-transition-group(stage) {
   border-radius: var(--shape-xxl);
   overflow: visible;
@@ -2132,11 +2152,10 @@ html[data-dir="back"]::view-transition-new(stage) {
     scroll-behavior: auto !important;
   }
 
-  :root:not(.fonts-ready) .rise,
   .rise {
     opacity: 1 !important;
     animation: none !important;
-    animation-play-state: running !important;
+    --font-delay: 0s !important;
   }
 
   .blob {
