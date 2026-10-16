@@ -36,3 +36,5 @@ Thumbs.db
 .agents/
 skills-lock.json
 .claude/
+__pycache__/
+*.pyc

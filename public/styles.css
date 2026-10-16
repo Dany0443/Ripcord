@@ -1,31 +1,90 @@
-@property --md-sys-color-primary {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #8b4f25;
+/* ==========================================================================
+   Self-Hosted Typography: Roboto Flex & Material Symbols Rounded
+   ========================================================================== */
+
+/* Roboto Flex (cyrillic-ext) */
+@font-face {
+  font-family: 'Roboto Flex';
+  font-style: normal;
+  font-weight: 100 1000;
+  font-stretch: 25% 151%;
+  font-display: swap;
+  src: url('/assets/fonts/roboto-flex-cyrillic-ext.woff2') format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
 }
 
-@property --md-sys-color-primary-container {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #ffdbc8;
+/* Roboto Flex (cyrillic) */
+@font-face {
+  font-family: 'Roboto Flex';
+  font-style: normal;
+  font-weight: 100 1000;
+  font-stretch: 25% 151%;
+  font-display: swap;
+  src: url('/assets/fonts/roboto-flex-cyrillic.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
 }
 
-@property --md-sys-color-secondary-container {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #ffdbc8;
+/* Roboto Flex (greek) */
+@font-face {
+  font-family: 'Roboto Flex';
+  font-style: normal;
+  font-weight: 100 1000;
+  font-stretch: 25% 151%;
+  font-display: swap;
+  src: url('/assets/fonts/roboto-flex-greek.woff2') format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
 }
 
-@property --md-sys-color-tertiary-container {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #e7e5ac;
+/* Roboto Flex (vietnamese) */
+@font-face {
+  font-family: 'Roboto Flex';
+  font-style: normal;
+  font-weight: 100 1000;
+  font-stretch: 25% 151%;
+  font-display: swap;
+  src: url('/assets/fonts/roboto-flex-vietnamese.woff2') format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
 }
 
-@property --md-sys-color-surface-container {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #fcebe2;
+/* Roboto Flex (latin-ext) */
+@font-face {
+  font-family: 'Roboto Flex';
+  font-style: normal;
+  font-weight: 100 1000;
+  font-stretch: 25% 151%;
+  font-display: swap;
+  src: url('/assets/fonts/roboto-flex-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* Roboto Flex (latin) */
+@font-face {
+  font-family: 'Roboto Flex';
+  font-style: normal;
+  font-weight: 100 1000;
+  font-stretch: 25% 151%;
+  font-display: swap;
+  src: url('/assets/fonts/roboto-flex-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Fallback font with metrics tuned to match Roboto Flex and eliminate layout shift */
+@font-face {
+  font-family: 'Roboto Flex Fallback';
+  src: local('Arial'), local('Helvetica'), local('DejaVu Sans'), local('Liberation Sans'), system-ui;
+  ascent-override: 92.8%;
+  descent-override: 24.4%;
+  line-gap-override: 0%;
+  size-adjust: 100%;
+}
+
+/* Material Symbols Rounded */
+@font-face {
+  font-family: 'Material Symbols Rounded';
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: block;
+  src: url('/assets/fonts/material-symbols-rounded.woff2') format('woff2');
 }
 
 :root {
@@ -79,9 +138,10 @@
   --spring-effects: linear(0, 0.033 3%, 0.11 6%, 0.207 9%, 0.31 13%, 0.41 16%, 0.503 19%, 0.585 22%, 0.657 25%, 0.719 28%, 0.771 31%, 0.814 34%, 0.85 38%, 0.88 41%, 0.904 44%, 0.923 47%, 0.939 50%, 0.952 53%, 0.962 56%, 0.97 59%, 0.976 63%, 0.981 66%, 0.985 69%, 0.988 72%, 0.991 75%, 0.993 78%, 0.994 81%, 0.996 84%, 0.997 88%, 0.997 91%, 0.998 94%, 0.998 97%, 1);
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
+  --theme-fade: 1000ms;
 
   /* font sizes and line heights */
-  --font: "Roboto Flex", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font: "Roboto Flex", "Roboto Flex Fallback", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --gutter: clamp(16px, 4vw, 32px);
 }
@@ -124,43 +184,6 @@
   --md-sys-color-inverse-surface: #f0dfd7;
   --md-sys-color-inverse-on-surface: #382e29;
   --md-sys-color-inverse-primary: #8b4f25;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
-
-    --md-sys-color-primary: #ffb689;
-    --md-sys-color-on-primary: #512300;
-    --md-sys-color-primary-container: #6f3810;
-    --md-sys-color-on-primary-container: #ffdbc8;
-    --md-sys-color-secondary: #e5bfa9;
-    --md-sys-color-on-secondary: #432b1c;
-    --md-sys-color-secondary-container: #5c4130;
-    --md-sys-color-on-secondary-container: #ffdbc8;
-    --md-sys-color-tertiary: #cbc992;
-    --md-sys-color-on-tertiary: #323209;
-    --md-sys-color-tertiary-container: #49491e;
-    --md-sys-color-on-tertiary-container: #e7e5ac;
-    --md-sys-color-error: #ffb4ab;
-    --md-sys-color-on-error: #690005;
-    --md-sys-color-error-container: #93000a;
-    --md-sys-color-on-error-container: #ffdad6;
-    --md-sys-color-surface: #1a120d;
-    --md-sys-color-on-surface: #f0dfd7;
-    --md-sys-color-on-surface-variant: #d7c2b8;
-    --md-sys-color-surface-dim: #1a120d;
-    --md-sys-color-surface-bright: #413731;
-    --md-sys-color-surface-container-lowest: #140d08;
-    --md-sys-color-surface-container-low: #221a15;
-    --md-sys-color-surface-container: #261e19;
-    --md-sys-color-surface-container-high: #312823;
-    --md-sys-color-surface-container-highest: #3d332d;
-    --md-sys-color-outline: #9f8d83;
-    --md-sys-color-outline-variant: #52443c;
-    --md-sys-color-inverse-surface: #f0dfd7;
-    --md-sys-color-inverse-on-surface: #382e29;
-    --md-sys-color-inverse-primary: #8b4f25;
-  }
 }
 
 /* base page styles and reset */
@@ -302,64 +325,89 @@ button {
   display: block;
   aspect-ratio: 1;
   opacity: 0.55;
-  border-radius: 60% 40% 55% 45% / 55% 45% 60% 40%;
   translate: calc(var(--px, 0) * var(--k)) calc(var(--py, 0) * var(--k));
-  transition: translate 1s var(--ease-standard), background-color 0.8s var(--ease-standard), opacity 0.6s var(--ease-standard);
-  animation: morph 18s ease-in-out infinite, drift 28s ease-in-out infinite;
+  transition: translate 1s var(--ease-standard);
+  pointer-events: none;
+}
+
+.blob path {
+  fill: var(--blob-color, currentColor);
 }
 
 .blob--1 {
   --k: 34px;
+  --blob-color: var(--md-sys-color-primary-container);
   width: min(54vw, 660px);
   left: -14vw;
   top: -18vh;
-  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-primary-container);
+  animation: drift-1 32s ease-in-out infinite;
 }
 
 .blob--2 {
   --k: -46px;
+  --blob-color: var(--md-sys-color-tertiary-container);
   width: min(44vw, 540px);
   right: -12vw;
   top: 20vh;
-  background: var(--md-sys-color-tertiary-container);
-  animation-delay: -6s;
+  color: var(--md-sys-color-tertiary-container);
+  animation: drift-2 26s ease-in-out infinite -5s;
 }
 
 .blob--3 {
   --k: 26px;
+  --blob-color: var(--md-sys-color-secondary-container);
   width: min(38vw, 440px);
   left: 28vw;
   bottom: -26vh;
-  background: var(--md-sys-color-secondary-container);
-  animation-delay: -12s;
+  color: var(--md-sys-color-secondary-container);
+  animation: drift-3 36s ease-in-out infinite -10s;
 }
 
-@keyframes morph {
-
-  0%,
-  100% {
-    border-radius: 60% 40% 55% 45% / 55% 45% 60% 40%;
+@keyframes drift-1 {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1, 1);
   }
-
-  33% {
-    border-radius: 42% 58% 46% 54% / 60% 40% 48% 52%;
+  25% {
+    transform: translate3d(2.5vw, -2vh, 0) rotate(85deg) scale(1.08, 0.94);
   }
-
-  66% {
-    border-radius: 54% 46% 38% 62% / 42% 58% 56% 44%;
-  }
-}
-
-@keyframes drift {
-
-  0%,
-  100% {
-    transform: translate(0, 0) rotate(0deg);
-  }
-
   50% {
-    transform: translate(3vw, -2vh) rotate(24deg);
+    transform: translate3d(-1.5vw, 2.5vh, 0) rotate(180deg) scale(0.95, 1.06);
   }
+  75% {
+    transform: translate3d(2vw, 1.5vh, 0) rotate(265deg) scale(1.04, 0.96);
+  }
+}
+
+@keyframes drift-2 {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1, 1);
+  }
+  33% {
+    transform: translate3d(-3vw, 2vh, 0) rotate(-110deg) scale(0.94, 1.08);
+  }
+  66% {
+    transform: translate3d(2vw, -2.5vh, 0) rotate(-230deg) scale(1.06, 0.95);
+  }
+}
+
+@keyframes drift-3 {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1, 1);
+  }
+  30% {
+    transform: translate3d(2vw, 2vh, 0) rotate(100deg) scale(1.05, 0.96);
+  }
+  70% {
+    transform: translate3d(-2.5vw, -1.5vh, 0) rotate(240deg) scale(0.96, 1.05);
+  }
+}
+
+:root.tab-hidden .blob,
+:root.tab-hidden .brand__mark,
+:root.tab-hidden .brand__bar,
+:root.tab-hidden .wavy__fill {
+  animation-play-state: paused !important;
 }
 
 /* top navigation bar */
@@ -393,6 +441,17 @@ button {
   color: var(--md-sys-color-on-primary);
   clip-path: var(--shape-flower);
   transition: rotate 0.7s var(--spring-bouncy);
+}
+
+.brand__eq {
+  width: 24px;
+  height: 24px;
+  display: block;
+}
+
+.brand__bar {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
 }
 
 .brand:hover .brand__mark {
@@ -479,6 +538,7 @@ button {
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
   cursor: pointer;
+  text-decoration: none;
   transition: border-radius 0.5s var(--spring-spatial);
 }
 
@@ -568,18 +628,6 @@ button {
   }
 }
 
-.rise {
-  animation: rise 0.5s var(--spring-spatial) backwards;
-  animation-delay: calc(var(--i, 0) * 45ms);
-}
-
-@keyframes rise {
-  from {
-    opacity: 0;
-    translate: 0 16px;
-  }
-}
-
 /* hero section with title and logo */
 
 .hero {
@@ -599,6 +647,7 @@ button {
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
   font: 600 0.875rem/1 var(--font);
+  transform-origin: 0% 50%;
 }
 
 .eyebrow .icon {
@@ -621,6 +670,7 @@ button {
 
 .wiggle {
   display: inline-block;
+  transform-origin: 0% 75%;
   transition: font-variation-settings 0.5s var(--spring-spatial), translate 0.5s var(--spring-bouncy), rotate 0.5s var(--spring-bouncy);
 }
 
@@ -635,20 +685,166 @@ button {
 
 .stage {
   --stage-bg: var(--md-sys-color-surface-container);
+  --stage-shadow:
+    0 1px 2px rgb(0 0 0 / 0.06),
+    0 32px 56px -28px color-mix(in srgb, var(--md-sys-color-primary) 45%, transparent);
   position: relative;
   padding: clamp(20px, 4vw, 32px);
   border-radius: var(--shape-xxl);
-  background: var(--stage-bg);
-  box-shadow:
-    0 1px 2px rgb(0 0 0 / 0.06),
-    0 32px 56px -28px color-mix(in srgb, var(--md-sys-color-primary) 45%, transparent);
-  transition: box-shadow 0.6s var(--ease-standard), background-color 0.6s var(--ease-standard);
   view-transition-name: stage;
 }
 
+.stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  background: var(--stage-bg);
+  box-shadow: var(--stage-shadow);
+  transform-origin: 50% 0%;
+  pointer-events: none;
+}
+
 .screen-wrap {
+  position: relative;
+  z-index: 1;
   display: grid;
   gap: 20px;
+  transform-origin: 50% 0%;
+}
+
+/* signature Ripcord intro animation (stage unfold -> taut headline) */
+
+:root[data-intro] {
+  --intro-scale: 1;
+}
+
+:root[data-intro="short"] {
+  --intro-scale: 0.28;
+}
+
+/* CSS-only fallback if scripts fail or fonts-ready is delayed */
+:root[data-intro]:not(.fonts-ready) .stage::before,
+:root[data-intro]:not(.fonts-ready) .screen-wrap,
+:root[data-intro]:not(.fonts-ready) .eyebrow {
+  animation: intro-fallback-reveal 0.2s var(--ease-standard) 0.6s backwards;
+}
+
+@keyframes intro-fallback-reveal {
+  from {
+    opacity: 0.01;
+  }
+}
+
+/* 1. Stage card and contents unfold downward */
+:root.fonts-ready[data-intro] .stage::before {
+  animation: stage-unfold calc(860ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) 0s backwards;
+}
+
+:root.fonts-ready[data-intro] .screen-wrap {
+  animation: stage-content-unfold calc(800ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(60ms * var(--intro-scale)) backwards;
+}
+
+/* 2. Hero headline words tighten into place with small stagger */
+:root.fonts-ready[data-intro] .eyebrow {
+  animation: eyebrow-pull calc(460ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(40ms * var(--intro-scale)) backwards;
+}
+
+:root.fonts-ready[data-intro] .wiggle {
+  animation: word-tighten calc(520ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc((70ms + var(--w, 0) * 40ms) * var(--intro-scale)) backwards;
+}
+
+/* 3. Brand mark equalizer bars bounce once */
+:root.fonts-ready[data-intro] .brand__bar {
+  animation: eq-bounce calc(520ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc((50ms + var(--b, 0) * 45ms) * var(--intro-scale)) both;
+}
+
+/* 4. Background blobs ease in separately and subtly */
+:root.fonts-ready[data-intro] .blob--1 {
+  animation: drift-1 32s ease-in-out infinite, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(40ms * var(--intro-scale)) backwards;
+}
+
+:root.fonts-ready[data-intro] .blob--2 {
+  animation: drift-2 26s ease-in-out infinite -5s, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(120ms * var(--intro-scale)) backwards;
+}
+
+:root.fonts-ready[data-intro] .blob--3 {
+  animation: drift-3 36s ease-in-out infinite -10s, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(200ms * var(--intro-scale)) backwards;
+}
+
+@keyframes stage-unfold {
+  0% {
+    opacity: 0;
+    transform: scaleY(0.04);
+  }
+  16% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+
+@keyframes stage-content-unfold {
+  0% {
+    opacity: 0;
+    transform: translateY(-8px) scaleY(0.96);
+  }
+  24% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+@keyframes eyebrow-pull {
+  from {
+    opacity: 0;
+    transform: scaleX(0.9) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scaleX(1) translateY(0);
+  }
+}
+
+@keyframes word-tighten {
+  0% {
+    transform: scaleX(0.78) translateY(3px);
+  }
+  100% {
+    transform: scaleX(1) translateY(0);
+  }
+}
+
+@keyframes eq-bounce {
+  0% {
+    transform: scaleY(1);
+  }
+  38% {
+    transform: scaleY(0.32);
+  }
+  74% {
+    transform: scaleY(1.22);
+  }
+  100% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes blob-ease-in {
+  from {
+    opacity: 0;
+    scale: 0.88;
+  }
+  to {
+    opacity: 0.55;
+    scale: 1;
+  }
 }
 
 .screen {
@@ -1319,35 +1515,42 @@ body[data-stage="working"] .media {
   color: var(--md-sys-color-on-surface-variant);
 }
 
-/* download progress bar */
+/* ==========================================================================
+   Material 3 Expressive Linear Progress Indicator
+   ========================================================================== */
 
 .wavy {
-  --wave: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='12' viewBox='0 0 24 12'%3E%3Cpath d='M0 6 Q6 0 12 6 T24 6' fill='none' stroke='black' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E");
   position: relative;
-  --pn: 0;
-  height: 12px;
+  height: 10px;
+  width: 100%;
+  border-radius: 9999px;
+  background-color: var(--md-sys-color-surface-container-highest);
   overflow: hidden;
+  contain: paint;
+  isolation: isolate;
 }
 
 .wavy::before,
-.wavy__fill {
-  content: "";
+.wavy::after {
+  display: none;
+}
+
+/* Stop indicator on the inactive edge (MD3 Expressive token) */
+.wavy__stop {
   position: absolute;
-  inset: 0 auto 0 0;
-  -webkit-mask: var(--wave) repeat-x 0 center / 24px 12px;
-  mask: var(--wave) repeat-x 0 center / 24px 12px;
-  animation: wave 0.9s linear infinite;
+  right: 3px;
+  top: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background-color: var(--md-sys-color-primary);
+  opacity: 0.55;
+  pointer-events: none;
+  transition: opacity 0.3s var(--ease-standard);
+  z-index: 1;
 }
 
-.wavy::before {
-  width: 100%;
-  background: var(--md-sys-color-outline-variant);
-}
-
-/*
- * --pn is overall progress as a 0..1 number. The fill blends smoothly
- * tertiary (0-33%) -> secondary (34-66%) -> primary (67-99%) using only theme roles.
- */
+/* Base active indicator fill */
 .wavy__fill {
   --c-low: color-mix(in oklch,
       var(--md-sys-color-secondary) calc(clamp(0, (var(--pn) - 0.2) / 0.27, 1) * 100%),
@@ -1355,46 +1558,140 @@ body[data-stage="working"] .media {
   --c-mid: color-mix(in oklch,
       var(--md-sys-color-primary) calc(clamp(0, (var(--pn) - 0.53) / 0.27, 1) * 100%),
       var(--c-low));
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
   width: var(--p, 0%);
-  background: var(--c-mid);
-  transition: width 0.5s var(--spring-effects), background-color 0.6s var(--ease-standard);
+  border-radius: 9999px;
+  background-color: var(--c-mid, var(--md-sys-color-primary));
+  transition: width 0.4s var(--spring-effects), background-color 0.4s var(--ease-standard);
+  z-index: 3;
 }
+
+.wavy:not([data-indeterminate="true"]) .wavy__fill {
+  transform: none;
+  animation: none;
+}
+
+/* Fluid specular sheen on determinate active bar */
+.wavy:not([data-indeterminate="true"]) .wavy__fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.25) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: m3-sheen 3s ease-in-out infinite;
+  opacity: 0.85;
+}
+
+/* Secondary indicator for indeterminate animation */
+.wavy__secondary {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  border-radius: 9999px;
+  background-color: var(--md-sys-color-primary);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* --------------------------------------------------------------------------
+   Indeterminate State (Downloading / Preparing)
+   Fluid, breathing dual-indicator M3 Expressive motion
+   -------------------------------------------------------------------------- */
 
 .wavy[data-indeterminate="true"] .wavy__fill {
-  width: 34%;
-  background: var(--md-sys-color-primary);
-  animation: wave 0.9s linear infinite, sweep 1.8s var(--ease-standard) infinite;
+  width: 100%;
+  background-color: var(--md-sys-color-primary);
+  transform-origin: left center;
+  animation: m3-indeterminate-primary 2.2s cubic-bezier(0.2, 0, 0, 1) infinite;
 }
 
-/* finished: settle the wave and switch to the success container role */
+.wavy[data-indeterminate="true"] .wavy__secondary {
+  opacity: 1;
+  width: 100%;
+  transform-origin: left center;
+  animation: m3-indeterminate-secondary 2.2s cubic-bezier(0.2, 0, 0, 1) infinite;
+}
+
+.wavy[data-indeterminate="true"] .wavy__stop {
+  opacity: 0.35;
+}
+
+/* --------------------------------------------------------------------------
+   Complete State
+   -------------------------------------------------------------------------- */
+
 .wavy[data-complete="true"] {
-  border-radius: 9999px;
-  background: var(--md-sys-color-primary-container);
+  background-color: var(--md-sys-color-primary-container);
 }
 
-.wavy[data-complete="true"]::before {
-  background: transparent;
+.wavy[data-complete="true"] .wavy__stop {
+  opacity: 0;
+}
+
+.wavy[data-complete="true"] .wavy__secondary {
+  opacity: 0;
+  animation: none;
 }
 
 .wavy[data-complete="true"] .wavy__fill {
-  background: var(--md-sys-color-on-primary-container);
-  animation-play-state: paused;
+  width: 100%;
+  background-color: var(--md-sys-color-on-primary-container);
+  animation: none;
 }
 
-@keyframes wave {
-  to {
-    -webkit-mask-position: -24px center;
-    mask-position: -24px center;
+.wavy[data-complete="true"] .wavy__fill::after {
+  display: none;
+}
+
+/* --------------------------------------------------------------------------
+   M3 Expressive Keyframes
+   -------------------------------------------------------------------------- */
+
+@keyframes m3-indeterminate-primary {
+  0% {
+    transform: translateX(-35%) scaleX(0.05);
+  }
+  38% {
+    transform: translateX(18%) scaleX(0.68);
+  }
+  68% {
+    transform: translateX(82%) scaleX(0.42);
+  }
+  100% {
+    transform: translateX(105%) scaleX(0.05);
   }
 }
 
-@keyframes sweep {
-  from {
-    translate: -105% 0;
+@keyframes m3-indeterminate-secondary {
+  0% {
+    transform: translateX(-100%) scaleX(0.05);
   }
+  38% {
+    transform: translateX(-100%) scaleX(0.05);
+  }
+  68% {
+    transform: translateX(12%) scaleX(0.52);
+  }
+  100% {
+    transform: translateX(105%) scaleX(0.05);
+  }
+}
 
-  to {
-    translate: 300% 0;
+@keyframes m3-sheen {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
   }
 }
 
@@ -1726,6 +2023,94 @@ dialog::backdrop {
   animation: none;
 }
 
+/* theme & cover-art element color transitions: smooth and 100% interactive */
+html.theme-switching :is(
+  body,
+  .stage::before,
+  .eyebrow,
+  .brand__mark,
+  .search,
+  .field,
+  .segmented span,
+  .slider__thumb,
+  .chip span,
+  .switch-row,
+  .switch__track,
+  .switch__thumb,
+  .callout,
+  .list-item,
+  .list-item img,
+  .cover,
+  .badge,
+  .wavy,
+  .wavy__fill,
+  .wavy__secondary,
+  .wavy__stop,
+  .tracklist,
+  .track,
+  .done__mark,
+  .snackbar,
+  dialog,
+  dialog::before
+) {
+  transition:
+    background-color var(--theme-fade) var(--ease-standard),
+    border-color var(--theme-fade) var(--ease-standard),
+    box-shadow var(--theme-fade) var(--ease-standard);
+}
+
+html.theme-switching .btn {
+  transition:
+    background-color var(--theme-fade) var(--ease-standard),
+    color var(--theme-fade) var(--ease-standard),
+    border-radius 0.5s var(--spring-spatial),
+    transform 0.5s var(--spring-spatial),
+    opacity 0.2s;
+}
+
+html.theme-switching :is(.blob path, .brand__bar, .icon-btn svg) {
+  transition: fill var(--theme-fade) var(--ease-standard);
+}
+
+html.theme-switching :is(
+  .brand__name,
+  .icon,
+  .eyebrow span,
+  .wiggle,
+  .label,
+  .supporting,
+  .t-title,
+  .value,
+  .search input,
+  .field label,
+  .field input,
+  .field__suffix,
+  .segmented span,
+  .slider__ticks span,
+  .chip span,
+  .list-item__text strong,
+  .list-item__text small,
+  .media__title,
+  .media__artist,
+  .badge,
+  .meta,
+  .track__title,
+  .track__num,
+  .track__sub,
+  .track__status,
+  .note,
+  #snackbar-text,
+  .dialog__body p,
+  .dialog__body li span,
+  .footer p,
+  .footer a
+) {
+  transition:
+    background-color var(--theme-fade) var(--ease-standard),
+    color var(--theme-fade) var(--ease-standard),
+    box-shadow var(--theme-fade) var(--ease-standard);
+}
+
 ::view-transition-group(stage) {
   border-radius: var(--shape-xxl);
   overflow: visible;
@@ -1829,9 +2214,9 @@ html[data-dir="back"]::view-transition-new(stage) {
   }
 
   .stage {
+    --stage-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
     padding: 16px 14px;
     border-radius: var(--shape-xl);
-    box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
   }
 
   .media {
@@ -1979,6 +2364,26 @@ html[data-dir="back"]::view-transition-new(stage) {
     scroll-behavior: auto !important;
   }
 
+  .stage::before,
+  .screen-wrap,
+  .eyebrow,
+  .wiggle,
+  .brand__bar {
+    opacity: 1 !important;
+    clip-path: none !important;
+    transform: none !important;
+    animation: none !important;
+  }
+
+  .blob {
+    animation: none !important;
+    transition: none !important;
+    translate: 0 0 !important;
+    transform: none !important;
+    scale: 1 !important;
+    opacity: 0.55 !important;
+  }
+
   ::view-transition-group(*),
   ::view-transition-old(*),
   ::view-transition-new(*) {
@@ -1986,14 +2391,19 @@ html[data-dir="back"]::view-transition-new(stage) {
   }
   /* keep a visible, static "working" state instead of a frozen sweep */
   .wavy[data-indeterminate="true"] .wavy__fill {
-    width: 100%;
-    translate: none;
-    opacity: 0.45;
+    width: 60%;
+    transform: none !important;
+    opacity: 0.65;
     animation: none !important;
   }
 
-  .wavy::before,
-  .wavy__fill {
+  .wavy__secondary,
+  .wavy__fill,
+  .wavy__fill::after {
     animation: none !important;
+  }
+
+  .wavy[data-indeterminate="true"] .wavy__secondary {
+    display: none;
   }
 }

@@ -4,7 +4,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <title>Ripcord - pull the audio out of any link</title>
+    <title>Ripcord</title>
     <meta name="description"
         content="Paste a Spotify or YouTube link and get clean audio files with cover art and tags. Fast, free, no account.">
     <meta name="color-scheme" content="light dark">
@@ -13,39 +13,55 @@
     <meta property="og:title" content="Ripcord">
     <meta property="og:description" content="Paste a link. Pull the sound out.">
     <meta property="og:type" content="website">
-    <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="icon" href="favicon.png" type="image/png">
-    <link rel="apple-touch-icon" href="favicon.png">
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+    <link rel="preload" href="/assets/fonts/roboto-flex-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/assets/fonts/material-symbols-rounded.woff2" as="font" type="font/woff2" crossorigin>
 
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wdth,wght,GRAD@8..144,25..151,100..1000,-200..150&display=swap">
-    <link rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=block">
+    <script src="theme-init.js"></script>
+
     <link rel="stylesheet" href="styles.css">
 
-    <script src="theme.js"></script>
-    <script type="module" src="app.js"></script>
+    <script defer src="script.js"></script>
 </head>
 
 <body data-stage="input">
     <a class="skip" href="#url">Skip to the link box</a>
 
     <div class="backdrop" aria-hidden="true">
-        <span class="blob blob--1"></span>
-        <span class="blob blob--2"></span>
-        <span class="blob blob--3"></span>
+        <svg class="blob blob--1" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+            <path d="M44.7,-76.4C58.8,-69.2,71.8,-59.1,79.6,-45.8C87.4,-32.6,90,-16.3,88.5,-0.9C87,14.6,81.4,29.2,73.1,42.2C64.7,55.2,53.6,66.6,40.2,73.8C26.8,81,13.4,84,-0.6,85.1C-14.7,86.2,-29.3,85.3,-42.6,79.1C-55.9,72.9,-67.8,61.4,-75.8,47.7C-83.8,34,-87.8,17,-87.3,0.3C-86.8,-16.4,-81.8,-32.8,-73.2,-46.2C-64.6,-59.6,-52.4,-70,-38.6,-77.3C-24.8,-84.6,-9.4,-88.8,4.1,-95.9C17.6,-103,30.6,-83.6,44.7,-76.4Z" transform="translate(100 100)" />
+        </svg>
+        <svg class="blob blob--2" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+            <path d="M38.1,-64.8C49.9,-58.5,60.3,-49.2,68.4,-37.7C76.5,-26.2,82.3,-13.1,82.4,0.1C82.6,13.2,77.1,26.4,69.5,38.1C61.8,49.8,52.1,60,40.3,67.3C28.5,74.6,14.3,79.1,-0.1,79.3C-14.5,79.5,-29,75.4,-41.8,68.1C-54.6,60.8,-65.7,50.3,-73.2,37.6C-80.8,24.8,-84.8,9.8,-83.2,-4.5C-81.6,-18.8,-74.3,-32.4,-64.7,-43.3C-55,-54.2,-43,-62.4,-30.3,-68.2C-17.6,-74,-4.1,-77.4,8,-90.1C20.1,-102.8,26.3,-71.1,38.1,-64.8Z" transform="translate(100 100)" />
+        </svg>
+        <svg class="blob blob--3" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+            <path d="M47.7,-79.8C61.9,-73.4,73.6,-60.8,81.4,-46.1C89.2,-31.4,93.1,-14.7,91.8,1.4C90.5,17.5,84,33,74.5,46.1C65,59.2,52.5,69.9,38.4,76.5C24.3,83.1,8.6,85.6,-6.8,86.2C-22.2,86.8,-37.3,85.5,-50.2,78.7C-63.1,71.9,-73.8,59.6,-80.7,45.5C-87.6,31.4,-90.7,15.7,-89.2,0.9C-87.7,-14,-81.6,-28,-73.3,-40.4C-65,-52.8,-54.5,-63.6,-41.7,-70.7C-28.9,-77.8,-13.8,-81.2,1.8,-84.1C17.4,-87,33.5,-86.2,47.7,-79.8Z" transform="translate(100 100)" />
+        </svg>
     </div>
 
     <header class="top-bar">
         <a class="brand" href="/" aria-label="Ripcord home">
-            <span class="brand__mark"><span class="icon fill" aria-hidden="true">graphic_eq</span></span>
+            <span class="brand__mark" aria-hidden="true">
+                <svg class="brand__eq" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                    <rect class="brand__bar" style="--b:0" x="3" y="10" width="2" height="4" rx="1" />
+                    <rect class="brand__bar" style="--b:1" x="7" y="6" width="2" height="12" rx="1" />
+                    <rect class="brand__bar" style="--b:2" x="11" y="2" width="2" height="20" rx="1" />
+                    <rect class="brand__bar" style="--b:3" x="15" y="6" width="2" height="12" rx="1" />
+                    <rect class="brand__bar" style="--b:4" x="19" y="10" width="2" height="4" rx="1" />
+                </svg>
+            </span>
             <span class="brand__name">Ripcord</span>
         </a>
         <div class="top-bar__actions">
-            <button class="icon-btn" id="theme-btn" type="button" aria-label="Theme: automatic" title="Theme">
-                <span class="icon" id="theme-icon" aria-hidden="true">brightness_auto</span>
+            <a class="icon-btn" id="github-btn" href="https://github.com/rusux64-bit/Ripcord" target="_blank"
+                rel="noopener noreferrer" aria-label="Ripcord on GitHub" title="Ripcord on GitHub">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" clip-rule="evenodd"
+                        d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
+                </svg>
+            </a>
+            <button class="icon-btn" id="theme-btn" type="button" aria-label="Switch theme" title="Switch theme">
+                <span class="icon" id="theme-icon" aria-hidden="true">dark_mode</span>
             </button>
             <button class="icon-btn" id="about-btn" type="button" aria-label="About Ripcord" title="About">
                 <span class="icon" aria-hidden="true">info</span>
@@ -55,16 +71,16 @@
 
     <main class="layout">
         <section class="hero" aria-labelledby="hero-title">
-            <p class="eyebrow rise" style="--i:0"><span class="icon fill" aria-hidden="true">wb_sunny</span><span
+            <p class="eyebrow"><span class="icon fill" aria-hidden="true">wb_sunny</span><span
                     id="greeting">Hey there</span></p>
-            <h1 class="display rise" id="hero-title" style="--i:1">
-                <span class="wiggle">Got</span> <span class="wiggle">a</span> <span class="wiggle">link?</span>
-                <em><span class="wiggle">Let's</span> <span class="wiggle">pull</span> <span class="wiggle">the</span>
-                    <span class="wiggle">sound</span> <span class="wiggle">out.</span></em>
+            <h1 class="display" id="hero-title">
+                <span class="wiggle" style="--w:0">Got</span> <span class="wiggle" style="--w:1">a</span> <span class="wiggle" style="--w:2">link?</span>
+                <em><span class="wiggle" style="--w:3">Let's</span> <span class="wiggle" style="--w:4">pull</span> <span class="wiggle" style="--w:5">the</span>
+                    <span class="wiggle" style="--w:6">sound</span> <span class="wiggle" style="--w:7">out.</span></em>
             </h1>
         </section>
 
-        <section class="stage rise" id="stage" style="--i:2" aria-label="Downloader">
+        <section class="stage" id="stage" aria-label="Downloader">
             <div class="screen-wrap">
 
                 <div class="media" id="media">
@@ -183,7 +199,9 @@
                         <h2 class="t-title" id="working-title" tabindex="-1">Warming things up</h2>
                         <div class="wavy" id="wavy" data-indeterminate="true" role="progressbar"
                             aria-labelledby="working-title" aria-valuemin="0" aria-valuemax="100">
+                            <span class="wavy__secondary" aria-hidden="true"></span>
                             <span class="wavy__fill" aria-hidden="true"></span>
+                            <span class="wavy__stop" aria-hidden="true"></span>
                         </div>
                         <div class="meta"><span id="meta-left">Getting started</span><span id="meta-right">0:00</span>
                         </div>

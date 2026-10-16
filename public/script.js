@@ -125,6 +125,15 @@ function tidyTitle(title) {
     return cleaned || title;
 }
 
+function extractSingleVideoId(parsed) {
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    let id = null;
+    if (host === 'youtu.be') id = parsed.pathname.slice(1);
+    else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
+    else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
+    return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
+}
+
 function normaliseUrl(raw) {
     let value = (raw || '').trim();
     if (!value) return null;
@@ -141,23 +150,22 @@ function normaliseUrl(raw) {
     if (!ok) return null;
 
     if (['youtube.com', 'music.youtube.com', 'm.youtube.com', 'youtu.be'].some(h => host === h || host.endsWith('.' + h))) {
+        parsed.hash = '';
         const list = parsed.searchParams.get('list');
-        const isRadio = (list && list.toUpperCase().startsWith('RD')) ||
-            (list && list.toUpperCase().startsWith('UL')) ||
-            parsed.searchParams.get('start_radio') === '1';
 
-        if (isRadio) {
-            parsed.searchParams.delete('list');
-            parsed.searchParams.delete('start_radio');
-            parsed.searchParams.delete('index');
-
-            if (parsed.pathname === '/playlist' && list) {
-                const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
-                if (match) {
-                    parsed.pathname = '/watch';
-                    parsed.searchParams.set('v', match[1]);
-                }
+        if (parsed.pathname === '/playlist' && list) {
+            const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
+            if (match) {
+                parsed.pathname = '/watch';
+                parsed.searchParams.set('v', match[1]);
             }
+        }
+
+        if (extractSingleVideoId(parsed)) {
+            parsed.searchParams.delete('list');
+            parsed.searchParams.delete('index');
+            parsed.searchParams.delete('start_radio');
+            parsed.searchParams.delete('pp');
         }
     }
 
@@ -186,145 +194,259 @@ document.addEventListener('pointerdown', event => {
 
 // slightly move the background blobs when moving the mouse
 
+const backdropEl = document.querySelector('.backdrop');
 let parallaxQueued = false;
 addEventListener('pointermove', event => {
-    if (parallaxQueued || reduceMotion.matches) return;
+    if (parallaxQueued || reduceMotion.matches || !backdropEl) return;
     parallaxQueued = true;
     requestAnimationFrame(() => {
         parallaxQueued = false;
-        root.style.setProperty('--px', ((event.clientX / innerWidth) - 0.5).toFixed(3));
-        root.style.setProperty('--py', ((event.clientY / innerHeight) - 0.5).toFixed(3));
+        backdropEl.style.setProperty('--px', ((event.clientX / innerWidth) - 0.5).toFixed(3));
+        backdropEl.style.setProperty('--py', ((event.clientY / innerHeight) - 0.5).toFixed(3));
     });
 }, { passive: true });
 
+// pause animations when tab is hidden to save battery / CPU
+document.addEventListener('visibilitychange', () => {
+    root.classList.toggle('tab-hidden', document.hidden);
+});
+
 // extract theme colors from the album cover art
 
-const TOKENS = {
-    primary: 'primary', onPrimary: 'on-primary',
-    primaryContainer: 'primary-container', onPrimaryContainer: 'on-primary-container',
-    secondary: 'secondary', onSecondary: 'on-secondary',
-    secondaryContainer: 'secondary-container', onSecondaryContainer: 'on-secondary-container',
-    tertiary: 'tertiary', onTertiary: 'on-tertiary',
-    tertiaryContainer: 'tertiary-container', onTertiaryContainer: 'on-tertiary-container',
-    error: 'error', onError: 'on-error',
-    errorContainer: 'error-container', onErrorContainer: 'on-error-container',
-    surface: 'surface', onSurface: 'on-surface', onSurfaceVariant: 'on-surface-variant',
-    surfaceDim: 'surface-dim', surfaceBright: 'surface-bright',
-    surfaceContainerLowest: 'surface-container-lowest', surfaceContainerLow: 'surface-container-low',
-    surfaceContainer: 'surface-container', surfaceContainerHigh: 'surface-container-high',
-    surfaceContainerHighest: 'surface-container-highest',
-    outline: 'outline', outlineVariant: 'outline-variant',
-    inverseSurface: 'inverse-surface', inverseOnSurface: 'inverse-on-surface',
-    inversePrimary: 'inverse-primary'
-};
+const TOKENS = [
+    'primary', 'on-primary', 'primary-container', 'on-primary-container',
+    'secondary', 'on-secondary', 'secondary-container', 'on-secondary-container',
+    'tertiary', 'on-tertiary', 'tertiary-container', 'on-tertiary-container',
+    'error', 'on-error', 'error-container', 'on-error-container',
+    'surface', 'on-surface', 'on-surface-variant',
+    'surface-dim', 'surface-bright',
+    'surface-container-lowest', 'surface-container-low',
+    'surface-container', 'surface-container-high',
+    'surface-container-highest',
+    'outline', 'outline-variant',
+    'inverse-surface', 'inverse-on-surface', 'inverse-primary'
+];
 
-const DEFAULT_SEED = 0xFFE0782B;
-let mcu = null;
-let seed = DEFAULT_SEED;
+let currentSeed = null;
+let themeSwitchTimer = 0;
 
-async function loadColourEngine() {
-    try {
-        mcu = await import('./vendor/mcu.js');
-        // register color properties so theme changes transition smoothly
-        for (const name of Object.values(TOKENS)) {
-            try {
-                CSS.registerProperty({ name: `--md-sys-color-${name}`, syntax: '<color>', inherits: true, initialValue: 'transparent' });
-            } catch { /* already registered */ }
-        }
-        applyScheme();
-        // enable transitions only after the page paints so it does not flash on load
-        requestAnimationFrame(() => {
-            setTimeout(() => {
-                root.style.transition = Object.values(TOKENS)
-                    .map(n => `--md-sys-color-${n} 0.8s ease`).join(', ');
-            }, 150);
-        });
-    } catch {
-        mcu = null;
+function finishThemeSwitch(event) {
+    if (event && (event.target !== document.body || event.propertyName !== 'background-color')) return;
+    clearTimeout(themeSwitchTimer);
+    root.classList.remove('theme-switching');
+}
+
+document.body.addEventListener('transitionend', finishThemeSwitch);
+
+function transitionTheme(updateFn) {
+    if (reduceMotion.matches) {
+        finishThemeSwitch();
+        updateFn();
+        return;
     }
+    root.classList.add('theme-switching');
+    void root.offsetWidth;
+    updateFn();
+    clearTimeout(themeSwitchTimer);
+    themeSwitchTimer = setTimeout(finishThemeSwitch, 1050);
+}
+
+function initColourEngine() {
+    applyScheme();
 }
 
 function isDarkNow() {
-    const chosen = root.dataset.theme;
-    if (chosen) return chosen === 'dark';
-    return matchMedia('(prefers-color-scheme: dark)').matches;
+    return root.dataset.theme === 'dark';
 }
 
 function applyScheme() {
-    if (!mcu) return;
     // remove custom colors if we are back to the default theme
-    if (seed === DEFAULT_SEED) {
-        for (const name of Object.values(TOKENS)) root.style.removeProperty(`--md-sys-color-${name}`);
+    if (!currentSeed) {
+        for (const name of TOKENS) root.style.removeProperty(`--md-sys-color-${name}`);
     } else {
-        const scheme = new mcu.SchemeTonalSpot(mcu.Hct.fromInt(seed), isDarkNow(), 0);
-        for (const [prop, name] of Object.entries(TOKENS)) {
-            const color = mcu.MaterialDynamicColors[prop];
-            if (color) root.style.setProperty(`--md-sys-color-${name}`, mcu.hexFromArgb(color.getArgb(scheme)));
+        const dark = isDarkNow();
+        const h = currentSeed.h;
+        const th = (h + 60) % 360;
+
+        const colors = dark ? {
+            'primary': `hsl(${h}, 80%, 75%)`,
+            'on-primary': `hsl(${h}, 80%, 15%)`,
+            'primary-container': `hsl(${h}, 70%, 25%)`,
+            'on-primary-container': `hsl(${h}, 85%, 88%)`,
+            'secondary': `hsl(${h}, 30%, 75%)`,
+            'on-secondary': `hsl(${h}, 30%, 18%)`,
+            'secondary-container': `hsl(${h}, 30%, 28%)`,
+            'on-secondary-container': `hsl(${h}, 35%, 88%)`,
+            'tertiary': `hsl(${th}, 45%, 72%)`,
+            'on-tertiary': `hsl(${th}, 50%, 16%)`,
+            'tertiary-container': `hsl(${th}, 45%, 26%)`,
+            'on-tertiary-container': `hsl(${th}, 50%, 88%)`,
+            'error': '#ffb4ab',
+            'on-error': '#690005',
+            'error-container': '#93000a',
+            'on-error-container': '#ffdad6',
+            'surface': `hsl(${h}, 18%, 8%)`,
+            'on-surface': `hsl(${h}, 18%, 90%)`,
+            'on-surface-variant': `hsl(${h}, 14%, 74%)`,
+            'surface-dim': `hsl(${h}, 18%, 6%)`,
+            'surface-bright': `hsl(${h}, 18%, 22%)`,
+            'surface-container-lowest': `hsl(${h}, 20%, 5%)`,
+            'surface-container-low': `hsl(${h}, 18%, 10%)`,
+            'surface-container': `hsl(${h}, 18%, 13%)`,
+            'surface-container-high': `hsl(${h}, 18%, 17%)`,
+            'surface-container-highest': `hsl(${h}, 18%, 22%)`,
+            'outline': `hsl(${h}, 12%, 58%)`,
+            'outline-variant': `hsl(${h}, 14%, 28%)`,
+            'inverse-surface': `hsl(${h}, 20%, 90%)`,
+            'inverse-on-surface': `hsl(${h}, 18%, 15%)`,
+            'inverse-primary': `hsl(${h}, 75%, 35%)`
+        } : {
+            'primary': `hsl(${h}, 65%, 34%)`,
+            'on-primary': '#ffffff',
+            'primary-container': `hsl(${h}, 85%, 88%)`,
+            'on-primary-container': `hsl(${h}, 80%, 18%)`,
+            'secondary': `hsl(${h}, 25%, 36%)`,
+            'on-secondary': '#ffffff',
+            'secondary-container': `hsl(${h}, 35%, 88%)`,
+            'on-secondary-container': `hsl(${h}, 35%, 18%)`,
+            'tertiary': `hsl(${th}, 40%, 34%)`,
+            'on-tertiary': '#ffffff',
+            'tertiary-container': `hsl(${th}, 45%, 86%)`,
+            'on-tertiary-container': `hsl(${th}, 50%, 16%)`,
+            'error': '#ba1a1a',
+            'on-error': '#ffffff',
+            'error-container': '#ffdad6',
+            'on-error-container': '#93000a',
+            'surface': `hsl(${h}, 25%, 98%)`,
+            'on-surface': `hsl(${h}, 20%, 12%)`,
+            'on-surface-variant': `hsl(${h}, 15%, 30%)`,
+            'surface-dim': `hsl(${h}, 18%, 86%)`,
+            'surface-bright': `hsl(${h}, 25%, 98%)`,
+            'surface-container-lowest': '#ffffff',
+            'surface-container-low': `hsl(${h}, 25%, 95%)`,
+            'surface-container': `hsl(${h}, 25%, 92%)`,
+            'surface-container-high': `hsl(${h}, 25%, 89%)`,
+            'surface-container-highest': `hsl(${h}, 25%, 85%)`,
+            'outline': `hsl(${h}, 12%, 46%)`,
+            'outline-variant': `hsl(${h}, 18%, 80%)`,
+            'inverse-surface': `hsl(${h}, 18%, 20%)`,
+            'inverse-on-surface': `hsl(${h}, 25%, 94%)`,
+            'inverse-primary': `hsl(${h}, 80%, 75%)`
+        };
+
+        for (const [key, val] of Object.entries(colors)) {
+            root.style.setProperty(`--md-sys-color-${key}`, val);
         }
     }
     syncThemeColorMeta();
 }
 
 function syncThemeColorMeta() {
-    const surface = getComputedStyle(root).getPropertyValue('--md-sys-color-surface').trim();
-    if (!surface) return;
+    const surface = root.style.getPropertyValue('--md-sys-color-surface').trim() || (isDarkNow() ? '#1a120c' : '#fff8f4');
     $$('meta[name="theme-color"]').forEach(meta => {
         meta.removeAttribute('media');
         meta.content = surface;
     });
 }
 
+function extractDominantColor(img) {
+    try {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return null;
+        const size = 32;
+        canvas.width = size;
+        canvas.height = size;
+        ctx.drawImage(img, 0, 0, size, size);
+        const data = ctx.getImageData(0, 0, size, size).data;
+        let bestScore = -1;
+        let bestHue = null;
+
+        for (let i = 0; i < data.length; i += 16) {
+            const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+            if (a < 128) continue;
+            const max = Math.max(r, g, b), min = Math.min(r, g, b);
+            const l = (max + min) / 510;
+            if (l < 0.12 || l > 0.90) continue;
+            const d = max - min;
+            const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1)) / 255;
+            if (s < 0.15) continue;
+
+            let h = 0;
+            if (d !== 0) {
+                if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
+                else if (max === g) h = ((b - r) / d + 2) * 60;
+                else h = ((r - g) / d + 4) * 60;
+            }
+            const score = s * 1.6 + (1 - Math.abs(l - 0.5));
+            if (score > bestScore) {
+                bestScore = score;
+                bestHue = Math.round(h);
+            }
+        }
+        return bestHue !== null ? { h: bestHue } : null;
+    } catch {
+        return null;
+    }
+}
+
 async function seedFromCover() {
-    if (!mcu) return;
     try {
         if (!el.coverImg.complete || !el.coverImg.naturalWidth) await el.coverImg.decode();
-        seed = await mcu.sourceColorFromImage(el.coverImg);
+        const nextSeed = extractDominantColor(el.coverImg);
+        transitionTheme(() => {
+            currentSeed = nextSeed;
+            applyScheme();
+        });
     } catch {
-        seed = DEFAULT_SEED;
+        resetSeed();
     }
-    applyScheme();
 }
 
 function resetSeed() {
-    if (seed === DEFAULT_SEED) return;
-    seed = DEFAULT_SEED;
-    applyScheme();
-}
-
-// toggle between dark and light mode
-
-const THEMES = [
-    { id: 'auto', icon: 'brightness_auto', label: 'Theme: automatic' },
-    { id: 'light', icon: 'light_mode', label: 'Theme: light' },
-    { id: 'dark', icon: 'dark_mode', label: 'Theme: dark' }
-];
-
-function currentThemeId() {
-    return root.dataset.theme || 'auto';
+    if (!currentSeed) return;
+    transitionTheme(() => {
+        currentSeed = null;
+        applyScheme();
+    });
 }
 
 function renderThemeButton() {
-    const t = THEMES.find(x => x.id === currentThemeId());
-    el.themeIcon.textContent = t.icon;
-    el.themeBtn.setAttribute('aria-label', t.label);
+    const isDark = isDarkNow();
+    el.themeIcon.textContent = isDark ? 'dark_mode' : 'light_mode';
+    const label = isDark ? 'Switch to light mode' : 'Switch to dark mode';
+    el.themeBtn.setAttribute('aria-label', label);
+    el.themeBtn.setAttribute('title', label);
 }
 
 el.themeBtn.addEventListener('click', () => {
-    const next = THEMES[(THEMES.findIndex(x => x.id === currentThemeId()) + 1) % THEMES.length];
-    if (next.id === 'auto') {
-        delete root.dataset.theme;
-        try { localStorage.removeItem('ripcord.theme'); } catch { /* ignore */ }
-    } else {
-        root.dataset.theme = next.id;
-        try { localStorage.setItem('ripcord.theme', next.id); } catch { /* ignore */ }
-    }
-    renderThemeButton();
-    applyScheme();
-    toast(next.label.replace('Theme: ', 'Theme set to ') + '.');
+    const next = isDarkNow() ? 'light' : 'dark';
+    transitionTheme(() => {
+        root.dataset.theme = next;
+        try {
+            localStorage.setItem('ripcord.theme', next);
+        } catch { /* ignore */ }
+        renderThemeButton();
+        applyScheme();
+        syncThemeColorMeta();
+    });
+    toast(next === 'dark' ? 'Theme set to dark.' : 'Theme set to light.');
 });
 
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-    if (!root.dataset.theme) applyScheme();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+    let hasStoredChoice = false;
+    try {
+        const stored = localStorage.getItem('ripcord.theme');
+        hasStoredChoice = stored === 'light' || stored === 'dark';
+    } catch { /* ignore */ }
+    if (!hasStoredChoice) {
+        transitionTheme(() => {
+            root.dataset.theme = e.matches ? 'dark' : 'light';
+            renderThemeButton();
+            applyScheme();
+            syncThemeColorMeta();
+        });
+    }
 });
 
 // show a small notification toast at the bottom
@@ -398,17 +520,6 @@ function go(stage, dir = 'forward') {
         after();
     }
     setSpinSpeed(stage === 'working' ? 4 : 1);
-}
-
-// change the greeting based on the time of day
-
-function setGreeting() {
-    const h = new Date().getHours();
-    let text = 'Good evening';
-    if (h < 5) text = 'Up late? Same';
-    else if (h < 12) text = 'Good morning';
-    else if (h < 18) text = 'Good afternoon';
-    el.greeting.textContent = text;
 }
 
 // logic for the search input box and paste button
@@ -506,10 +617,11 @@ async function submitUrl() {
         const res = await fetch(`/api/fetch-info?url=${encodeURIComponent(url)}`);
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again.');
-        state.url = url;
+        state.url = data.url || url;
+        el.url.value = state.url;
         state.info = data;
         showOptions();
-        remember(url, data);
+        remember(state.url, data);
     } catch (err) {
         setFieldError(err.message);
     } finally {
@@ -675,6 +787,10 @@ function startDownload() {
     const name = safeName(el.filename.value) || suggestedName() || 'ripcord';
 
     const params = new URLSearchParams({ url: state.url, bitrate: String(bitrate), format: fmt, filename: name });
+    if (!isCollection && nameTouched) {
+        const customTitle = el.filename.value.trim().slice(0, 120);
+        if (customTitle) params.set('title', customTitle);
+    }
     const saveName = isCollection ? `${safeName(info.title) || 'ripcord'}.zip` : `${name}.${fmt}`;
 
     el.workingTitle.textContent = isCollection ? 'Packing up your collection' : 'Pulling the sound out';
@@ -992,13 +1108,13 @@ el.againBtn.addEventListener('click', () => {
 
 // start everything up when the page loads
 
-setGreeting();
 renderThemeButton();
 renderRecent();
 syncPasteButton();
 setupSpin();
 syncThemeColorMeta();
-loadColourEngine();
+initColourEngine();
+
 setTimeout(() => {
-    $('#stage')?.classList.remove('rise');
-}, 800);
+    delete root.dataset.intro;
+}, 1350);

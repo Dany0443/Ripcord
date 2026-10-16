@@ -7,7 +7,6 @@ const os = require('os');
 const { randomUUID } = require('node:crypto');
 const { Transform } = require('node:stream');
 const { spawn, spawnSync } = require('child_process');
-const ffmpeg = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
@@ -32,7 +31,7 @@ function findExecutableInPath(command) {
 
 // Resolve directly from PATH so broken local `which` shims cannot hide system FFmpeg.
 const ffmpegPath = findExecutableInPath('ffmpeg') || ffmpegStatic || 'ffmpeg';
-ffmpeg.setFfmpegPath(ffmpegPath);
+const ffprobePath = findExecutableInPath('ffprobe') || 'ffprobe';
 
 // make sure yt-dlp is installed and in the system path
 const checkYtdlp = spawnSync('yt-dlp', ['--version']);
@@ -104,8 +103,8 @@ const checkAria2c = spawnSync('aria2c', ['--version']);
 const aria2cAvailable = checkAria2c.status === 0;
 Logger.info(`aria2c: ${aria2cAvailable ? 'available' : 'not installed'}${YTDLP_USE_ARIA2C && aria2cAvailable ? ' (enabled)' : ''}`);
 
-function cleanupStaleWorkFiles() {
-    const staleBefore = Date.now() - 6 * 60 * 60 * 1000;
+function sweepWorkDir(staleOnly = true) {
+    const staleBefore = staleOnly ? Date.now() - 6 * 60 * 60 * 1000 : Infinity;
     const prefixes = ['ripcord_', 'out_', 'track_', 'cover_', 'tagged_', 'comments_'];
     let removed = 0;
     try {
@@ -113,7 +112,7 @@ function cleanupStaleWorkFiles() {
             if (!entry.isFile() || !prefixes.some(prefix => entry.name.startsWith(prefix))) continue;
             const filePath = path.join(WORK_DIR, entry.name);
             try {
-                if (fs.statSync(filePath).mtimeMs < staleBefore) {
+                if (!staleOnly || fs.statSync(filePath).mtimeMs < staleBefore) {
                     fs.unlinkSync(filePath);
                     removed++;
                 }
@@ -124,9 +123,10 @@ function cleanupStaleWorkFiles() {
     } catch (error) {
         Logger.warn(`Unable to sweep work directory ${WORK_DIR}: ${error.message}`);
     }
-    Logger.info(`Temporary file sweep removed ${removed} stale file(s) from ${WORK_DIR}`);
+    Logger.info(`Temporary file sweep removed ${removed} ${staleOnly ? 'stale ' : ''}file(s) from ${WORK_DIR}`);
 }
 
+const cleanupStaleWorkFiles = () => sweepWorkDir(true);
 cleanupStaleWorkFiles();
 
 // optional cookies file if youtube starts blocking downloads
@@ -142,9 +142,12 @@ class DownloadQueue {
         this.maxQueued = maxQueued;
         this.running = 0;
         this.queue = [];
+        this.activeEntries = new Set();
+        this.shuttingDown = false;
     }
 
     addTask(task, res) {
+        if (this.shuttingDown) return false;
         if (this.running >= this.concurrency && this.queue.length >= this.maxQueued) return false;
 
         const entry = { task, res, controller: new AbortController(), started: false };
@@ -161,14 +164,17 @@ class DownloadQueue {
     }
 
     process() {
+        if (this.shuttingDown) return;
         if (this.running >= this.concurrency || this.queue.length === 0) return;
 
         this.running++;
         const entry = this.queue.shift();
         entry.started = true;
+        this.activeEntries.add(entry);
 
         if (entry.controller.signal.aborted || entry.res.destroyed) {
             entry.res.removeListener('close', entry.onClose);
+            this.activeEntries.delete(entry);
             this.running--;
             this.process();
             return;
@@ -178,9 +184,30 @@ class DownloadQueue {
             .catch(err => Logger.error(`[Queue] Task failed: ${err.message}`))
             .finally(() => {
                 entry.res.removeListener('close', entry.onClose);
+                this.activeEntries.delete(entry);
                 this.running--;
                 this.process();
             });
+    }
+
+    stopAccepting() {
+        this.shuttingDown = true;
+        while (this.queue.length > 0) {
+            const entry = this.queue.shift();
+            entry.res.removeListener('close', entry.onClose);
+            entry.controller.abort();
+            if (!entry.res.headersSent) {
+                entry.res.status(503).json({ error: 'Server is shutting down.' });
+            } else if (!entry.res.destroyed) {
+                entry.res.destroy();
+            }
+        }
+    }
+
+    abortAll() {
+        for (const entry of this.activeEntries) {
+            entry.controller.abort();
+        }
     }
 }
 
@@ -236,6 +263,58 @@ class MetadataSemaphore {
     }
 }
 
+class Semaphore {
+    constructor(concurrency) {
+        this.concurrency = concurrency;
+        this.running = 0;
+        this.queue = [];
+    }
+
+    async acquire(signal) {
+        if (signal?.aborted) throw new Error('Request cancelled.');
+        if (this.running < this.concurrency) {
+            this.running++;
+            return;
+        }
+
+        await new Promise((resolve, reject) => {
+            let waiter;
+            const onAbort = () => {
+                const idx = this.queue.indexOf(waiter);
+                if (idx !== -1) {
+                    this.queue.splice(idx, 1);
+                    reject(new Error('Request cancelled.'));
+                }
+            };
+
+            waiter = {
+                resolve: () => {
+                    if (signal) signal.removeEventListener('abort', onAbort);
+                    resolve();
+                },
+                reject: (err) => {
+                    if (signal) signal.removeEventListener('abort', onAbort);
+                    reject(err);
+                }
+            };
+
+            if (signal) {
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
+            this.queue.push(waiter);
+        });
+    }
+
+    release() {
+        while (this.queue.length > 0) {
+            const next = this.queue.shift();
+            next.resolve();
+            return;
+        }
+        this.running = Math.max(0, this.running - 1);
+    }
+}
+
 class AsyncBoundedQueue {
     constructor(capacity) {
         this.capacity = capacity;
@@ -287,12 +366,23 @@ class AsyncBoundedQueue {
 
 const downloadQueue = new DownloadQueue();
 const metadataSemaphore = new MetadataSemaphore();
+const ytdlpSemaphore = new Semaphore(DOWNLOAD_CONCURRENCY);
+const ffmpegSemaphore = new Semaphore(ENCODE_CONCURRENCY);
 
 // set up the express app
 const app = express();
 
 app.disable('x-powered-by');
 app.set('trust proxy', TRUST_PROXY_HOPS);
+
+let isShuttingDown = false;
+app.use((req, res, next) => {
+    if (isShuttingDown) {
+        res.setHeader('Connection', 'close');
+        return res.status(503).json({ error: 'Server is shutting down.' });
+    }
+    next();
+});
 app.use(helmet({
     contentSecurityPolicy: {
         directives: {
@@ -1205,21 +1295,29 @@ function cleanupFiles(files) {
     });
 }
 
+function extractSingleVideoId(parsed) {
+    const host = parsed.hostname.toLowerCase();
+    let id = null;
+    if (host === 'youtu.be') id = parsed.pathname.slice(1);
+    else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
+    else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
+    return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
+}
+
 // grab the 11 character id from a youtube link
 function getYouTubeVideoId(url) {
     try {
-        const parsed = new URL(url);
-        const host = parsed.hostname.toLowerCase();
-        let id = null;
-        if (host === 'youtu.be') id = parsed.pathname.slice(1);
-        else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
-        else if (parsed.pathname === '/playlist') {
+        let value = typeof url === 'string' ? url.trim() : '';
+        if (!value) return null;
+        const parsed = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+        const singleId = extractSingleVideoId(parsed);
+        if (singleId) return singleId;
+        if (parsed.pathname === '/playlist') {
             const list = parsed.searchParams.get('list');
             const match = list?.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
-            if (match) id = match[1];
+            if (match) return match[1];
         }
-        else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
-        return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
+        return null;
     } catch (e) {
         return null;
     }
@@ -1227,7 +1325,9 @@ function getYouTubeVideoId(url) {
 
 function isYouTubeUrl(url) {
     try {
-        const parsed = new URL(url);
+        let value = typeof url === 'string' ? url.trim() : '';
+        if (!value) return false;
+        const parsed = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
         return YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase());
     } catch (e) {
         return false;
@@ -1236,28 +1336,29 @@ function isYouTubeUrl(url) {
 
 function normalizeYouTubeUrl(url) {
     try {
-        const parsed = new URL(url);
+        let value = typeof url === 'string' ? url.trim() : '';
+        if (!value) return url;
+        const hasProtocol = /^https?:\/\//i.test(value);
+        const parsed = new URL(hasProtocol ? value : `https://${value}`);
         const host = parsed.hostname.toLowerCase();
         if (!YOUTUBE_HOSTS.has(host)) return url;
 
         const list = parsed.searchParams.get('list');
-        const isRadio = (list && list.toUpperCase().startsWith('RD')) ||
-            (list && list.toUpperCase().startsWith('UL')) ||
-            parsed.searchParams.get('start_radio') === '1';
-
-        if (isRadio) {
-            parsed.searchParams.delete('list');
-            parsed.searchParams.delete('start_radio');
-            parsed.searchParams.delete('index');
-
-            if (parsed.pathname === '/playlist' && list) {
-                const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
-                if (match) {
-                    parsed.pathname = '/watch';
-                    parsed.searchParams.set('v', match[1]);
-                }
+        if (parsed.pathname === '/playlist' && list) {
+            const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
+            if (match) {
+                parsed.pathname = '/watch';
+                parsed.searchParams.set('v', match[1]);
             }
         }
+
+        if (extractSingleVideoId(parsed)) {
+            parsed.searchParams.delete('list');
+            parsed.searchParams.delete('index');
+            parsed.searchParams.delete('start_radio');
+            parsed.searchParams.delete('pp');
+        }
+
         return parsed.href;
     } catch {
         return url;
@@ -1266,18 +1367,22 @@ function normalizeYouTubeUrl(url) {
 
 function isYouTubePlaylist(url) {
     try {
-        const parsed = new URL(url);
-        if (!YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase())) return false;
+        let value = typeof url === 'string' ? url.trim() : '';
+        if (!value) return false;
+        const parsed = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+        const host = parsed.hostname.toLowerCase();
+        if (!YOUTUBE_HOSTS.has(host)) return false;
+
+        if (extractSingleVideoId(parsed)) {
+            return false;
+        }
 
         const list = parsed.searchParams.get('list');
-        if (!list && parsed.pathname !== '/playlist') return false;
-
-        // Auto-generated YouTube Mixes / Radios (starting with RD or UL) are dynamic recommendation feeds, not downloadable static playlists.
         if (list && (list.toUpperCase().startsWith('RD') || list.toUpperCase().startsWith('UL') || parsed.searchParams.get('start_radio') === '1')) {
             return false;
         }
 
-        return parsed.pathname === '/playlist' || Boolean(list);
+        return (parsed.pathname === '/playlist' || Boolean(list)) && Boolean(list);
     } catch (e) {
         return false;
     }
@@ -1550,111 +1655,121 @@ async function getSpotifyData(url, signal) {
 // download the raw audio stream to a temp file using yt-dlp
 async function downloadToTemp(targetUrl, extension = 'webm', signal, targetFormat, onProgress) {
     const tempPath = path.join(WORK_DIR, `ripcord_${randomUUID()}.${extension}`);
+    await ytdlpSemaphore.acquire(signal);
 
-    return new Promise((resolve, reject) => {
-        const formatSelector = targetFormat === 'ogg'
-            ? 'bestaudio[acodec=opus]/bestaudio/best'
-            : targetFormat === 'm4a' ? 'bestaudio[acodec=aac]/bestaudio/best' : 'bestaudio/best';
-        const ytdlpArgs = [
-            '-f', formatSelector,
-            '--no-playlist',
-            '--no-warnings',
-            '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
-            '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
-            '--extractor-args', 'youtube:player_client=android,web'
-        ];
+    try {
+        return await new Promise((resolve, reject) => {
+            const formatSelector = targetFormat === 'ogg'
+                ? 'bestaudio[acodec=opus]/bestaudio/best'
+                : targetFormat === 'm4a' ? 'bestaudio[acodec=aac]/bestaudio/best' : 'bestaudio/best';
+            const ytdlpArgs = [
+                '-f', formatSelector,
+                '--no-playlist',
+                '--no-warnings',
+                '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
+                '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
+                '--extractor-args', 'youtube:player_client=android,web'
+            ];
 
-        if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
+            if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
 
-        if (COOKIES_PATH) {
-            ytdlpArgs.push('--cookies', COOKIES_PATH);
-        }
-
-        if (onProgress) {
-            ytdlpArgs.push('--newline', '--progress', '--progress-template',
-                'download:RIPCORD_PROGRESS %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s');
-        }
-
-        ytdlpArgs.push('-o', tempPath, '--', targetUrl);
-
-        const ytdlp = spawn('yt-dlp', ytdlpArgs);
-        ytdlp.stdout.on('data', chunk => {
-            if (!onProgress) return;
-            const matches = [...chunk.toString().matchAll(/RIPCORD_PROGRESS (\d+) (\d+(?:\.\d+)?)/g)];
-            const last = matches[matches.length - 1];
-            if (last && Number(last[2]) > 0) onProgress(Math.min(1, Number(last[1]) / Number(last[2])));
-        });
-        let timedOut = false;
-
-        const timeout = setTimeout(() => {
-            timedOut = true;
-            ytdlp.kill('SIGKILL');
-        }, 90000);
-        const onAbort = () => ytdlp.kill('SIGKILL');
-        if (signal?.aborted) onAbort();
-        else signal?.addEventListener('abort', onAbort, { once: true });
-
-        ytdlp.stderr.on('data', (data) => Logger.warn(`yt-dlp: ${data.toString().trim()}`));
-
-        ytdlp.on('close', (code) => {
-            clearTimeout(timeout);
-            signal?.removeEventListener('abort', onAbort);
-            if (signal?.aborted) {
-                cleanupFiles([tempPath]);
-                reject(new Error('Request cancelled.'));
-            } else if (timedOut) {
-                cleanupFiles([tempPath]);
-                reject(new Error('Audio download timed out.'));
-            } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
-                resolve(tempPath);
-            } else {
-                cleanupFiles([tempPath]);
-                reject(new Error('yt-dlp was unable to extract this audio source.'));
+            if (COOKIES_PATH) {
+                ytdlpArgs.push('--cookies', COOKIES_PATH);
             }
-        });
 
-        ytdlp.on('error', (err) => {
-            clearTimeout(timeout);
-            signal?.removeEventListener('abort', onAbort);
-            cleanupFiles([tempPath]);
-            reject(err);
+            if (onProgress) {
+                ytdlpArgs.push('--newline', '--progress', '--progress-template',
+                    'download:RIPCORD_PROGRESS %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s');
+            }
+
+            ytdlpArgs.push('-o', tempPath, '--', targetUrl);
+
+            const ytdlp = spawn('yt-dlp', ytdlpArgs);
+            ytdlp.stdout.on('data', chunk => {
+                if (!onProgress) return;
+                const matches = [...chunk.toString().matchAll(/RIPCORD_PROGRESS (\d+) (\d+(?:\.\d+)?)/g)];
+                const last = matches[matches.length - 1];
+                if (last && Number(last[2]) > 0) onProgress(Math.min(1, Number(last[1]) / Number(last[2])));
+            });
+            let timedOut = false;
+
+            const timeout = setTimeout(() => {
+                timedOut = true;
+                ytdlp.kill('SIGKILL');
+            }, 90000);
+            const onAbort = () => ytdlp.kill('SIGKILL');
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
+
+            ytdlp.stderr.on('data', (data) => Logger.warn(`yt-dlp: ${data.toString().trim()}`));
+
+            ytdlp.on('close', (code) => {
+                clearTimeout(timeout);
+                signal?.removeEventListener('abort', onAbort);
+                if (signal?.aborted) {
+                    cleanupFiles([tempPath]);
+                    reject(new Error('Request cancelled.'));
+                } else if (timedOut) {
+                    cleanupFiles([tempPath]);
+                    reject(new Error('Audio download timed out.'));
+                } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
+                    resolve(tempPath);
+                } else {
+                    cleanupFiles([tempPath]);
+                    reject(new Error('yt-dlp was unable to extract this audio source.'));
+                }
+            });
+
+            ytdlp.on('error', (err) => {
+                clearTimeout(timeout);
+                signal?.removeEventListener('abort', onAbort);
+                cleanupFiles([tempPath]);
+                reject(err);
+            });
         });
-    });
+    } finally {
+        ytdlpSemaphore.release();
+    }
 }
 
-function runFfmpeg(args, timeoutMessage, signal) {
-    return new Promise((resolve, reject) => {
-        if (signal?.aborted) return reject(new Error('Request cancelled.'));
+async function runFfmpeg(args, timeoutMessage, signal) {
+    await ffmpegSemaphore.acquire(signal);
+    try {
+        return await new Promise((resolve, reject) => {
+            if (signal?.aborted) return reject(new Error('Request cancelled.'));
 
-        const ff = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
-        let timedOut = false;
-        let stderr = '';
-        const timeout = setTimeout(() => {
-            timedOut = true;
-            ff.kill('SIGKILL');
-        }, 60000);
-        const onAbort = () => ff.kill('SIGKILL');
-        signal?.addEventListener('abort', onAbort, { once: true });
-        ff.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-4000); });
-        ff.on('error', error => {
-            clearTimeout(timeout);
-            signal?.removeEventListener('abort', onAbort);
-            reject(error);
+            const ff = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+            let timedOut = false;
+            let stderr = '';
+            const timeout = setTimeout(() => {
+                timedOut = true;
+                ff.kill('SIGKILL');
+            }, 60000);
+            const onAbort = () => ff.kill('SIGKILL');
+            signal?.addEventListener('abort', onAbort, { once: true });
+            ff.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-4000); });
+            ff.on('error', error => {
+                clearTimeout(timeout);
+                signal?.removeEventListener('abort', onAbort);
+                reject(error);
+            });
+            ff.on('close', code => {
+                clearTimeout(timeout);
+                signal?.removeEventListener('abort', onAbort);
+                if (signal?.aborted) reject(new Error('Request cancelled.'));
+                else if (timedOut) reject(new Error(timeoutMessage));
+                else if (code !== 0) reject(new Error(stderr.trim().slice(-1000) || 'FFmpeg encoding failed.'));
+                else resolve();
+            });
         });
-        ff.on('close', code => {
-            clearTimeout(timeout);
-            signal?.removeEventListener('abort', onAbort);
-            if (signal?.aborted) reject(new Error('Request cancelled.'));
-            else if (timedOut) reject(new Error(timeoutMessage));
-            else if (code !== 0) reject(new Error(stderr.trim().slice(-1000) || 'FFmpeg encoding failed.'));
-            else resolve();
-        });
-    });
+    } finally {
+        ffmpegSemaphore.release();
+    }
 }
 
 function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, title, artist, maxBytes, copyAudio = false) {
-    const args = ['-y', '-i', audioPath];
-    const embedsCover = coverPath && ['mp3', 'm4a'].includes(format);
+    const args = ['-hide_banner', '-loglevel', 'error', '-nostats', '-y', '-i', audioPath];
+    const embedsCover = coverPath && ['mp3', 'm4a', 'flac'].includes(format);
     if (embedsCover) args.push('-i', coverPath);
     args.push('-map', '0:a:0');
     if (embedsCover) args.push('-map', '1:v:0');
@@ -1669,7 +1784,7 @@ function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, tit
     if (title) args.push('-metadata', `title=${title}`);
     if (artist) args.push('-metadata', `artist=${artist}`);
     if (embedsCover) {
-        args.push('-c:v', 'mjpeg');
+        args.push('-c:v', 'copy');
         if (format === 'mp3') {
             args.push('-id3v2_version', '3', '-metadata:s:v', 'title=Album cover');
         }
@@ -1681,66 +1796,88 @@ function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, tit
 
 function probeAudioCodec(filePath) {
     return new Promise(resolve => {
-        ffmpeg.ffprobe(filePath, (error, metadata) => {
-            if (error) return resolve(null);
-            const audioStream = metadata?.streams?.find(stream => stream.codec_type === 'audio');
-            resolve(audioStream?.codec_name || null);
+        const proc = spawn(ffprobePath, [
+            '-v', 'error',
+            '-select_streams', 'a:0',
+            '-show_entries', 'stream=codec_name',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            filePath
+        ], { windowsHide: true });
+
+        let output = '';
+        const timer = setTimeout(() => proc.kill('SIGKILL'), 10000);
+        proc.stdout.on('data', data => { output += data.toString(); });
+        proc.on('error', () => {
+            clearTimeout(timer);
+            resolve(null);
+        });
+        proc.on('close', code => {
+            clearTimeout(timer);
+            if (code === 0) resolve(output.trim() || null);
+            else resolve(null);
         });
     });
 }
 
-// attach album cover art to flac or ogg files
-function injectVorbisCoverArt(filePath, imgPath, format) {
+// attach album cover art to ogg files
+async function injectVorbisCoverArt(filePath, imgPath, format) {
+    if (format !== 'ogg') return false;
     if (!fs.existsSync(imgPath) || !fs.existsSync(filePath)) return false;
 
-    if (format === 'ogg') {
-        try {
-            const imgBuffer = fs.readFileSync(imgPath);
-            const mimeType = 'image/jpeg';
-            const mimeBuf = Buffer.from(mimeType, 'utf8');
-            const descBuf = Buffer.from('', 'utf8');
+    try {
+        const imgBuffer = fs.readFileSync(imgPath);
+        const mimeType = 'image/jpeg';
+        const mimeBuf = Buffer.from(mimeType, 'utf8');
+        const descBuf = Buffer.from('', 'utf8');
 
-            const picType = Buffer.alloc(4); picType.writeUInt32BE(3, 0);
-            const mimeLen = Buffer.alloc(4); mimeLen.writeUInt32BE(mimeBuf.length, 0);
-            const descLen = Buffer.alloc(4); descLen.writeUInt32BE(descBuf.length, 0);
-            const width = Buffer.alloc(4); width.writeUInt32BE(0, 0);
-            const height = Buffer.alloc(4); height.writeUInt32BE(0, 0);
-            const depth = Buffer.alloc(4); depth.writeUInt32BE(0, 0);
-            const colors = Buffer.alloc(4); colors.writeUInt32BE(0, 0);
-            const imgLen = Buffer.alloc(4); imgLen.writeUInt32BE(imgBuffer.length, 0);
+        const picType = Buffer.alloc(4); picType.writeUInt32BE(3, 0);
+        const mimeLen = Buffer.alloc(4); mimeLen.writeUInt32BE(mimeBuf.length, 0);
+        const descLen = Buffer.alloc(4); descLen.writeUInt32BE(descBuf.length, 0);
+        const width = Buffer.alloc(4); width.writeUInt32BE(0, 0);
+        const height = Buffer.alloc(4); height.writeUInt32BE(0, 0);
+        const depth = Buffer.alloc(4); depth.writeUInt32BE(0, 0);
+        const colors = Buffer.alloc(4); colors.writeUInt32BE(0, 0);
+        const imgLen = Buffer.alloc(4); imgLen.writeUInt32BE(imgBuffer.length, 0);
 
-            const block = Buffer.concat([picType, mimeLen, mimeBuf, descLen, descBuf, width, height, depth, colors, imgLen, imgBuffer]);
-            const base64Block = block.toString('base64');
+        const block = Buffer.concat([picType, mimeLen, mimeBuf, descLen, descBuf, width, height, depth, colors, imgLen, imgBuffer]);
+        const base64Block = block.toString('base64');
 
-            const readResult = spawnSync('vorbiscomment', ['-l', '-R', filePath], { timeout: 15000, windowsHide: true });
-            if (readResult.error || readResult.status !== 0) return false;
+        const stdout = await new Promise((resolve, reject) => {
+            const proc = spawn('vorbiscomment', ['-l', '-R', filePath], { windowsHide: true });
+            let out = '';
+            let timedOut = false;
+            const timer = setTimeout(() => { timedOut = true; proc.kill('SIGKILL'); }, 15000);
+            proc.stdout.on('data', d => { out += d.toString(); });
+            proc.on('error', err => { clearTimeout(timer); reject(err); });
+            proc.on('close', code => {
+                clearTimeout(timer);
+                if (timedOut || code !== 0) reject(new Error('vorbiscomment read failed'));
+                else resolve(out);
+            });
+        });
 
-            let comments = readResult.stdout.toString().split('\n');
-            comments = comments.filter(c => c && !c.startsWith('metadata_block_picture='));
-            comments.push(`metadata_block_picture=${base64Block}`);
+        let comments = stdout.split('\n');
+        comments = comments.filter(c => c && !c.startsWith('metadata_block_picture='));
+        comments.push(`metadata_block_picture=${base64Block}\n`);
 
-            const tempCommentsFile = path.join(WORK_DIR, `comments_${randomUUID()}.txt`);
-            fs.writeFileSync(tempCommentsFile, comments.join('\n'));
-            try {
-                const writeResult = spawnSync('vorbiscomment', ['-w', '-R', '-c', tempCommentsFile, filePath], { timeout: 15000, windowsHide: true });
-                return !writeResult.error && writeResult.status === 0;
-            } finally {
-                cleanupFiles([tempCommentsFile]);
-            }
-        } catch (e) {
-            return false;
-        }
-    } else if (format === 'flac') {
-        try {
-            spawnSync('metaflac', ['--remove', '--block-type=PICTURE', '--except-block-type=STREAMINFO', filePath], { timeout: 15000, windowsHide: true });
-            const spec = `3||Front Cover||${imgPath}`;
-            const writeResult = spawnSync('metaflac', [`--import-picture-from=${spec}`, filePath], { timeout: 15000, windowsHide: true });
-            return !writeResult.error && writeResult.status === 0;
-        } catch (e) {
-            return false;
-        }
+        await new Promise((resolve, reject) => {
+            const proc = spawn('vorbiscomment', ['-w', '-R', filePath], { windowsHide: true });
+            let timedOut = false;
+            const timer = setTimeout(() => { timedOut = true; proc.kill('SIGKILL'); }, 15000);
+            proc.on('error', err => { clearTimeout(timer); reject(err); });
+            proc.on('close', code => {
+                clearTimeout(timer);
+                if (timedOut || code !== 0) reject(new Error('vorbiscomment write failed'));
+                else resolve();
+            });
+            proc.stdin.write(comments.join('\n'));
+            proc.stdin.end();
+        });
+
+        return true;
+    } catch {
+        return false;
     }
-    return false;
 }
 
 // transcode the audio with ffmpeg and stream it directly to the user
@@ -1791,8 +1928,8 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
         if (signal?.aborted) throw new Error('Request cancelled.');
         if (fs.statSync(tempOutPath).size >= MAX_AUDIO_OUTPUT_BYTES) throw new Error('Audio output exceeds the allowed size.');
 
-        if (tempImgPath && fs.existsSync(tempOutPath) && (format === 'ogg' || format === 'flac')) {
-            injectVorbisCoverArt(tempOutPath, tempImgPath, format);
+        if (tempImgPath && fs.existsSync(tempOutPath) && format === 'ogg') {
+            await injectVorbisCoverArt(tempOutPath, tempImgPath, format);
         }
 
         Logger.success(`Encoding complete. Streaming ${format.toUpperCase()} to client`);
@@ -1892,8 +2029,8 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
         if (signal?.aborted) throw new Error('Request cancelled.');
         if (fs.statSync(tempOutPath).size >= zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
 
-        if (tempImgPath && fs.existsSync(tempOutPath) && (audioFormat === 'ogg' || audioFormat === 'flac')) {
-            injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
+        if (tempImgPath && fs.existsSync(tempOutPath) && audioFormat === 'ogg') {
+            await injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
         }
 
         if (fs.statSync(tempOutPath).size > zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
@@ -1912,7 +2049,7 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
 }
 
 // worker function that processes the actual download request
-async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId = null) {
+async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId = null, customTitle = '') {
     try {
         Logger.info(`Task started (${audioFormat.toUpperCase()})`);
         if (signal.aborted) return;
@@ -1934,7 +2071,8 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}.${audioFormat}"`);
             res.setHeader('Content-Type', mimeType);
             const info = await getYoutubeInfo(url, signal);
-            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, info.title, info.author, signal);
+            const trackTitle = customTitle || info.title;
+            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal);
             return;
         }
 
@@ -1945,7 +2083,8 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             const spotifyData = await getSpotifyData(url, signal);
             const track = spotifyData.tracks[0];
             const matchUrl = await findSpotifyMatch(track, signal);
-            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, track.title, track.artist, signal);
+            const trackTitle = customTitle || track.title;
+            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal);
             return;
         }
 
@@ -1965,7 +2104,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', 'application/zip');
 
             const { ZipArchive } = await import('archiver');
-            const archive = new ZipArchive({ zlib: { level: 6 } });
+            const archive = new ZipArchive({ store: true });
             archive.pipe(res);
 
             archive.on('warning', (err) => Logger.warn(`ZIP archive warning: ${err.message}`));
@@ -2008,7 +2147,6 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
             try {
                 const handoffQueue = new AsyncBoundedQueue(4);
-                const encodedResults = new Array(tracks.length);
                 let nextTrack = 0;
                 const downloadWorker = async () => {
                     while (!signal.aborted) {
@@ -2029,8 +2167,16 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                         const downloaded = await handoffQueue.shift();
                         if (!downloaded) return;
                         const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal, report);
-                        if (signal.aborted && result?.filePath) cleanupFiles([result.filePath]);
-                        else if (result) encodedResults[downloaded.index] = result;
+                        if (signal.aborted) {
+                            if (result?.filePath) cleanupFiles([result.filePath]);
+                            return;
+                        }
+                        if (result?.filePath) {
+                            trackFilePaths.add(result.filePath);
+                            archiveFilePaths.set(result.name, result.filePath);
+                            archive.file(result.filePath, { name: result.name });
+                            addedTracks++;
+                        }
                     }
                 };
 
@@ -2039,18 +2185,6 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 await Promise.all(downloadWorkers);
                 handoffQueue.close();
                 await Promise.all(encodeWorkers);
-
-                for (const result of encodedResults) {
-                    if (!result?.filePath) continue;
-                    if (signal.aborted) {
-                        cleanupFiles([result.filePath]);
-                        continue;
-                    }
-                    trackFilePaths.add(result.filePath);
-                    archiveFilePaths.set(result.name, result.filePath);
-                    archive.file(result.filePath, { name: result.name });
-                    addedTracks++;
-                }
 
                 if (signal.aborted) throw new Error('Request cancelled.');
                 if (addedTracks === 0) throw new Error('No tracks could be processed.');
@@ -2122,7 +2256,8 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                     title: ytData.name,
                     trackCount: ytData.tracks.length,
                     tracks: ytData.tracks.map(t => ({ title: t.title, artist: t.artist || '' })),
-                    thumbnail: ytData.tracks[0]?.thumbnail || ''
+                    thumbnail: ytData.tracks[0]?.thumbnail || '',
+                    url
                 });
             } finally {
                 release?.();
@@ -2134,7 +2269,8 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                 type: 'track',
                 title: info.title,
                 artist: info.author,
-                thumbnail: info.thumbnail
+                thumbnail: info.thumbnail,
+                url
             });
         } else if (spotifyLinkDetails(url)?.type === 'track') {
             const spotifyData = await getSpotifyData(url, controller.signal);
@@ -2143,7 +2279,8 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                 type: 'track',
                 title: track.title,
                 artist: track.artist,
-                thumbnail: track.thumbnail
+                thumbnail: track.thumbnail,
+                url
             });
         } else if (spotifyLinkDetails(url)) {
             const spotifyData = await getSpotifyData(url, controller.signal);
@@ -2152,7 +2289,8 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                 title: spotifyData.name,
                 trackCount: spotifyData.tracks.length,
                 tracks: spotifyData.tracks.map(t => ({ title: t.title, artist: t.artist === 'Unknown Artist' ? '' : t.artist })),
-                thumbnail: spotifyData.thumbnail
+                thumbnail: spotifyData.thumbnail,
+                url
             });
         } else {
             return res.status(400).json({ error: 'Unsupported URL. Please provide a Spotify or YouTube link.' });
@@ -2169,6 +2307,7 @@ app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
     const bitrate = req.query.bitrate;
     const filename = req.query.filename;
     const format = req.query.format;
+    const title = req.query.title;
         const audioBitrate = bitrate === undefined
             ? 128
             : typeof bitrate === 'string' && /^\d{2,3}$/.test(bitrate) ? Number(bitrate) : NaN;
@@ -2186,16 +2325,20 @@ app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
     if (filename !== undefined && (typeof filename !== 'string' || filename.length > 120)) {
         return res.status(400).json({ error: 'Filename is invalid or too long.' });
     }
+    if (title !== undefined && (typeof title !== 'string' || title.length > 120)) {
+        return res.status(400).json({ error: 'Title is invalid or too long.' });
+    }
 
     const parsedUrl = new URL(rawUrl);
     parsedUrl.hash = '';
     const url = normalizeYouTubeUrl(parsedUrl.href);
     const safeFilename = sanitizeFilename(filename);
+    const customTitle = title !== undefined ? safeMetadataText(title) : '';
 
     const jobId = typeof req.query.job === 'string' && JOB_ID_PATTERN.test(req.query.job) ? req.query.job : null;
 
     const accepted = downloadQueue.addTask(
-        signal => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId),
+        signal => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId, customTitle),
         res
     );
     if (!accepted) {
@@ -2267,15 +2410,84 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Internal server error.' });
 });
 
+process.on('unhandledRejection', (reason) => {
+    Logger.error(`Unhandled Rejection: ${reason instanceof Error ? reason.stack || reason.message : reason}`);
+});
+
+process.on('uncaughtException', (err) => {
+    Logger.error(`Uncaught Exception: ${err.stack || err.message}`);
+    gracefulShutdown('uncaughtException');
+});
+
+let serverInstance = null;
+let shutdownPromise = null;
+
+function gracefulShutdown(signal) {
+    if (shutdownPromise) return shutdownPromise;
+    Logger.info(`Received ${signal}. Initiating graceful shutdown...`);
+    isShuttingDown = true;
+
+    shutdownPromise = (async () => {
+        downloadQueue.stopAccepting();
+
+        if (serverInstance) {
+            await new Promise((resolve) => {
+                serverInstance.close((err) => {
+                    if (err) Logger.warn(`Error closing HTTP server: ${err.message}`);
+                    else Logger.info('HTTP server closed.');
+                    resolve();
+                });
+            });
+        }
+
+        downloadQueue.abortAll();
+
+        const drainStart = Date.now();
+        while (downloadQueue.running > 0 && Date.now() - drainStart < 5000) {
+            await new Promise(r => setTimeout(r, 100));
+        }
+
+        sweepWorkDir(false);
+
+        Logger.success('Graceful shutdown complete.');
+        if (signal !== 'test') {
+            process.exit(signal === 'uncaughtException' ? 1 : 0);
+        }
+    })();
+
+    const forceExitTimeout = setTimeout(() => {
+        Logger.error('Graceful shutdown timed out, forcing exit.');
+        sweepWorkDir(false);
+        process.exit(1);
+    }, 10000);
+    forceExitTimeout.unref();
+
+    return shutdownPromise;
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 if (require.main === module) {
     const PORT = positiveIntegerEnv('PORT', 5224, 65535);
-    const server = app.listen(PORT, '0.0.0.0', () => {
+    serverInstance = app.listen(PORT, '0.0.0.0', () => {
         Logger.success(`Ripcord server live at http://localhost:${PORT}`);
         Logger.info('Ready for requests under domain');
     });
-    server.headersTimeout = 15000;
-    server.requestTimeout = 30000;
-    server.keepAliveTimeout = 5000;
+    serverInstance.headersTimeout = 15000;
+    serverInstance.requestTimeout = 30000;
+    serverInstance.keepAliveTimeout = 5000;
 }
 
-module.exports = { app, isSafeUrl, normalizeYouTubeUrl, isYouTubePlaylist, MetadataSemaphore };
+module.exports = {
+    app,
+    isSafeUrl,
+    normalizeYouTubeUrl,
+    isYouTubePlaylist,
+    MetadataSemaphore,
+    Semaphore,
+    DownloadQueue,
+    sweepWorkDir,
+    cleanupStaleWorkFiles,
+    gracefulShutdown
+};
