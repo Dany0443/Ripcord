@@ -228,17 +228,27 @@ const TOKENS = [
 ];
 
 let currentSeed = null;
+let themeSwitchTimer = 0;
+
+function finishThemeSwitch(event) {
+    if (event && (event.target !== document.body || event.propertyName !== 'background-color')) return;
+    clearTimeout(themeSwitchTimer);
+    root.classList.remove('theme-switching');
+}
+
+document.body.addEventListener('transitionend', finishThemeSwitch);
 
 function transitionTheme(updateFn) {
-    if (document.startViewTransition && !reduceMotion.matches) {
-        root.dataset.themeTransition = 'true';
-        const vt = document.startViewTransition(updateFn);
-        vt.finished.finally(() => {
-            delete root.dataset.themeTransition;
-        });
-    } else {
+    if (reduceMotion.matches) {
+        finishThemeSwitch();
         updateFn();
+        return;
     }
+    root.classList.add('theme-switching');
+    void root.offsetWidth;
+    updateFn();
+    clearTimeout(themeSwitchTimer);
+    themeSwitchTimer = setTimeout(finishThemeSwitch, 1050);
 }
 
 function initColourEngine() {
@@ -332,8 +342,7 @@ function applyScheme() {
 }
 
 function syncThemeColorMeta() {
-    const surface = getComputedStyle(root).getPropertyValue('--md-sys-color-surface').trim();
-    if (!surface) return;
+    const surface = root.style.getPropertyValue('--md-sys-color-surface').trim() || (isDarkNow() ? '#1a120c' : '#fff8f4');
     $$('meta[name="theme-color"]').forEach(meta => {
         meta.removeAttribute('media');
         meta.content = surface;

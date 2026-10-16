@@ -331,11 +331,12 @@ button {
 }
 
 .blob path {
-  fill: currentColor;
+  fill: var(--blob-color, currentColor);
 }
 
 .blob--1 {
   --k: 34px;
+  --blob-color: var(--md-sys-color-primary-container);
   width: min(54vw, 660px);
   left: -14vw;
   top: -18vh;
@@ -345,6 +346,7 @@ button {
 
 .blob--2 {
   --k: -46px;
+  --blob-color: var(--md-sys-color-tertiary-container);
   width: min(44vw, 540px);
   right: -12vw;
   top: 20vh;
@@ -354,6 +356,7 @@ button {
 
 .blob--3 {
   --k: 26px;
+  --blob-color: var(--md-sys-color-secondary-container);
   width: min(38vw, 440px);
   left: 28vw;
   bottom: -26vh;
@@ -699,7 +702,6 @@ button {
   border-radius: inherit;
   background: var(--stage-bg);
   box-shadow: var(--stage-shadow);
-  transition: box-shadow 0.6s var(--ease-standard), background-color 0.6s var(--ease-standard);
   transform-origin: 50% 0%;
   pointer-events: none;
 }
@@ -2086,27 +2088,96 @@ dialog::backdrop {
   animation: none;
 }
 
-/* theme & cover-art view transitions: full-page smooth crossfade */
-html[data-theme-transition] .stage {
-  view-transition-name: none;
+/* theme & cover-art element color transitions: smooth and 100% interactive */
+html.theme-switching :is(
+  body,
+  .stage::before,
+  .eyebrow,
+  .brand__mark,
+  .search,
+  .field,
+  .segmented span,
+  .slider__thumb,
+  .chip span,
+  .switch-row,
+  .switch__track,
+  .switch__thumb,
+  .callout,
+  .list-item,
+  .list-item img,
+  .cover,
+  .badge,
+  .wavy,
+  .wavy__fill,
+  .wavy__secondary,
+  .wavy__stop,
+  .tracklist,
+  .track,
+  .done__mark,
+  .snackbar,
+  dialog,
+  dialog::before
+) {
+  transition:
+    background-color var(--theme-fade) var(--ease-standard),
+    border-color var(--theme-fade) var(--ease-standard),
+    box-shadow var(--theme-fade) var(--ease-standard);
 }
 
-html[data-theme-transition]::view-transition-old(root) {
-  animation: theme-fade-out var(--theme-fade) var(--ease-standard) both;
+html.theme-switching .btn {
+  transition:
+    background-color var(--theme-fade) var(--ease-standard),
+    color var(--theme-fade) var(--ease-standard),
+    border-radius 0.5s var(--spring-spatial),
+    transform 0.5s var(--spring-spatial),
+    opacity 0.2s;
 }
 
-html[data-theme-transition]::view-transition-new(root) {
-  animation: theme-fade-in var(--theme-fade) var(--ease-standard) both;
+html.theme-switching :is(.blob path, .brand__bar, .icon-btn svg) {
+  transition: fill var(--theme-fade) var(--ease-standard);
 }
 
-@keyframes theme-fade-out {
-  from { opacity: 1; }
-  to { opacity: 0; }
+html.theme-switching .stage__cord path {
+  transition: stroke var(--theme-fade) var(--ease-standard);
 }
 
-@keyframes theme-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+html.theme-switching :is(
+  .brand__name,
+  .icon,
+  .eyebrow span,
+  .wiggle,
+  .label,
+  .supporting,
+  .t-title,
+  .value,
+  .search input,
+  .field label,
+  .field input,
+  .field__suffix,
+  .segmented span,
+  .slider__ticks span,
+  .chip span,
+  .list-item__text strong,
+  .list-item__text small,
+  .media__title,
+  .media__artist,
+  .badge,
+  .meta,
+  .track__title,
+  .track__num,
+  .track__sub,
+  .track__status,
+  .note,
+  #snackbar-text,
+  .dialog__body p,
+  .dialog__body li span,
+  .footer p,
+  .footer a
+) {
+  transition:
+    background-color var(--theme-fade) var(--ease-standard),
+    color var(--theme-fade) var(--ease-standard),
+    box-shadow var(--theme-fade) var(--ease-standard);
 }
 
 ::view-transition-group(stage) {
