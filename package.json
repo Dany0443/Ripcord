@@ -6,7 +6,6 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test/url-rules.test.js",
     "check:icons": "pipx run --spec \"fonttools[brotli,woff]\" python scripts/check-icons.py"
   },
   "keywords": [
