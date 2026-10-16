@@ -706,30 +706,6 @@ button {
   pointer-events: none;
 }
 
-.stage__cord {
-  position: absolute;
-  top: -10px;
-  left: 28px;
-  right: 28px;
-  width: calc(100% - 56px);
-  height: 20px;
-  z-index: 3;
-  overflow: visible;
-  pointer-events: none;
-  opacity: 0;
-  transform-origin: 50% 50%;
-}
-
-.stage__cord path {
-  fill: none;
-  stroke: var(--md-sys-color-primary);
-  stroke-width: 2.5px;
-  stroke-linecap: round;
-  vector-effect: non-scaling-stroke;
-  stroke-dasharray: 1;
-  stroke-dashoffset: 0;
-}
-
 .screen-wrap {
   position: relative;
   z-index: 1;
@@ -738,7 +714,7 @@ button {
   transform-origin: 50% 0%;
 }
 
-/* signature Ripcord intro animation (waveform cord -> stage unfold -> taut headline) */
+/* signature Ripcord intro animation (stage unfold -> taut headline) */
 
 :root[data-intro] {
   --intro-scale: 1;
@@ -761,89 +737,48 @@ button {
   }
 }
 
-/* 1. Waveform cord draws across stage, pulls taut, and settles into top edge */
-:root.fonts-ready[data-intro] .stage__cord {
-  animation: cord-taut calc(1080ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-:root.fonts-ready[data-intro] .stage__cord path {
-  animation: cord-draw calc(460ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-/* 2. Stage card and contents unfold downward from the taut cord line */
+/* 1. Stage card and contents unfold downward */
 :root.fonts-ready[data-intro] .stage::before {
-  animation: stage-unfold calc(820ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(220ms * var(--intro-scale)) backwards;
+  animation: stage-unfold calc(860ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) 0s backwards;
 }
 
 :root.fonts-ready[data-intro] .screen-wrap {
-  animation: stage-content-unfold calc(760ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(280ms * var(--intro-scale)) backwards;
+  animation: stage-content-unfold calc(800ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(60ms * var(--intro-scale)) backwards;
 }
 
-/* 3. Hero headline words tighten into place with small stagger */
+/* 2. Hero headline words tighten into place with small stagger */
 :root.fonts-ready[data-intro] .eyebrow {
-  animation: eyebrow-pull calc(480ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(60ms * var(--intro-scale)) backwards;
+  animation: eyebrow-pull calc(460ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(40ms * var(--intro-scale)) backwards;
 }
 
 :root.fonts-ready[data-intro] .wiggle {
-  animation: word-tighten calc(560ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc((90ms + var(--w, 0) * 40ms) * var(--intro-scale)) backwards;
+  animation: word-tighten calc(520ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc((70ms + var(--w, 0) * 40ms) * var(--intro-scale)) backwards;
 }
 
-/* 4. Brand mark equalizer bars bounce once */
+/* 3. Brand mark equalizer bars bounce once */
 :root.fonts-ready[data-intro] .brand__bar {
-  animation: eq-bounce calc(540ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc((60ms + var(--b, 0) * 45ms) * var(--intro-scale)) both;
+  animation: eq-bounce calc(520ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc((50ms + var(--b, 0) * 45ms) * var(--intro-scale)) both;
 }
 
-/* 5. Background blobs ease in separately and subtly */
+/* 4. Background blobs ease in separately and subtly */
 :root.fonts-ready[data-intro] .blob--1 {
-  animation: drift-1 32s ease-in-out infinite, blob-ease-in calc(950ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(80ms * var(--intro-scale)) backwards;
+  animation: drift-1 32s ease-in-out infinite, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(40ms * var(--intro-scale)) backwards;
 }
 
 :root.fonts-ready[data-intro] .blob--2 {
-  animation: drift-2 26s ease-in-out infinite -5s, blob-ease-in calc(950ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(200ms * var(--intro-scale)) backwards;
+  animation: drift-2 26s ease-in-out infinite -5s, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(120ms * var(--intro-scale)) backwards;
 }
 
 :root.fonts-ready[data-intro] .blob--3 {
-  animation: drift-3 36s ease-in-out infinite -10s, blob-ease-in calc(950ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(320ms * var(--intro-scale)) backwards;
-}
-
-@keyframes cord-draw {
-  from {
-    stroke-dashoffset: 1;
-  }
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-
-@keyframes cord-taut {
-  0% {
-    opacity: 0;
-    transform: translateY(10px) scaleY(1);
-  }
-  12% {
-    opacity: 1;
-    transform: translateY(10px) scaleY(1);
-  }
-  34% {
-    opacity: 1;
-    transform: translateY(10px) scaleY(1);
-  }
-  62% {
-    opacity: 0.95;
-    transform: translateY(10px) scaleY(0.035);
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(10px) scaleY(0.02);
-  }
+  animation: drift-3 36s ease-in-out infinite -10s, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(200ms * var(--intro-scale)) backwards;
 }
 
 @keyframes stage-unfold {
   0% {
     opacity: 0;
-    transform: scaleY(0.02);
+    transform: scaleY(0.04);
   }
-  18% {
+  16% {
     opacity: 1;
   }
   100% {
@@ -855,9 +790,9 @@ button {
 @keyframes stage-content-unfold {
   0% {
     opacity: 0;
-    transform: translateY(-10px) scaleY(0.94);
+    transform: translateY(-8px) scaleY(0.96);
   }
-  28% {
+  24% {
     opacity: 1;
   }
   100% {
@@ -2137,10 +2072,6 @@ html.theme-switching :is(.blob path, .brand__bar, .icon-btn svg) {
   transition: fill var(--theme-fade) var(--ease-standard);
 }
 
-html.theme-switching .stage__cord path {
-  transition: stroke var(--theme-fade) var(--ease-standard);
-}
-
 html.theme-switching :is(
   .brand__name,
   .icon,
@@ -2288,12 +2219,6 @@ html[data-dir="back"]::view-transition-new(stage) {
     border-radius: var(--shape-xl);
   }
 
-  .stage__cord {
-    left: 18px;
-    right: 18px;
-    width: calc(100% - 36px);
-  }
-
   .media {
     padding: 10px;
     gap: 12px;
@@ -2437,10 +2362,6 @@ html[data-dir="back"]::view-transition-new(stage) {
     transition-duration: 0.001ms !important;
     transition-delay: 0s !important;
     scroll-behavior: auto !important;
-  }
-
-  .stage__cord {
-    display: none !important;
   }
 
   .stage::before,
