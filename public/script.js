@@ -1107,5 +1107,5 @@ syncThemeColorMeta();
 initColourEngine();
 
 setTimeout(() => {
-    $('#stage')?.classList.remove('rise');
-}, 1200);
+    delete root.dataset.intro;
+}, 1350);
