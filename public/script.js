@@ -8,6 +8,28 @@ const root = document.documentElement;
 const body = document.body;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
+// client logger: console-only in development, no-op in production
+const isDev = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) || location.protocol === 'file:';
+function logClientEvent(type, msg, detail = null) {
+    if (isDev) {
+        console.log(`[ripcord:${type}] ${msg}`, detail || '');
+    }
+}
+
+window.addEventListener('error', (event) => {
+    logClientEvent('error', event.message || 'Window error', {
+        filename: event.filename ? event.filename.split('/').pop() : '',
+        lineno: event.lineno,
+        colno: event.colno
+    });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+    logClientEvent('error', 'Unhandled promise rejection', {
+        reason: event.reason instanceof Error ? event.reason.message : String(event.reason)
+    });
+});
+
 const el = {
     url: $('#url'),
     search: $('#search'),
@@ -59,11 +81,31 @@ const el = {
     aboutBtn: $('#about-btn'),
     aboutClose: $('#about-close'),
     about: $('#about'),
-    greeting: $('#greeting')
+    greeting: $('#greeting'),
+    inputError: $('#input-error'),
+    inputErrorMsg: $('#input-error-msg'),
+    inputErrorRef: $('#input-error-ref'),
+    inputErrorActions: $('#input-error-actions'),
+    optionsError: $('#options-error'),
+    optionsErrorMsg: $('#options-error-msg'),
+    optionsErrorRef: $('#options-error-ref'),
+    optionsErrorActions: $('#options-error-actions'),
+    doneSkipped: $('#done-skipped'),
+    doneSkippedToggle: $('#done-skipped-toggle'),
+    doneSkippedToggleText: $('#done-skipped-toggle-text'),
+    doneSkippedPanel: $('#done-skipped-panel'),
+    doneSkippedList: $('#done-skipped-list'),
+    screenOptions: $('#screen-options'),
+    playlistCallout: $('#playlist-callout'),
+    playlistCalloutText: $('#playlist-callout-text'),
+    playlistCalloutCap: $('#playlist-callout-cap'),
+    playlistToggleBtn: $('#playlist-toggle-btn')
 };
 
 const state = {
     stage: 'input',
+    mode: 'track',
+    playlistContext: null,
     info: null,
     url: '',
     xhr: null,
@@ -74,7 +116,10 @@ const state = {
     jobId: '',
     poll: 0,
     rows: [],
-    activeRow: -1
+    activeRow: -1,
+    lastJob: null,
+    countdownTimer: null,
+    currentError: null
 };
 
 const BITRATES = [128, 192, 320];
@@ -117,11 +162,150 @@ function safeName(text) {
     return String(text).replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '').replace(/\s+/g, ' ').trim();
 }
 
-// strip out bracketed words like official video from titles
-const JUNK = /\s*[([][^)\]]*\b(official|video|audio|lyrics?|remaster(ed)?|hd|4k|visuali[sz]er|explicit)\b[^)\]]*[)\]]/gi;
+function resolveDownloadName(dispositionHeader, info, isCollection, format = 'mp3') {
+    const cleanFmt = String(format || 'mp3').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp3';
+    const expectedExt = isCollection ? 'zip' : cleanFmt;
+    const extSuffix = `.${expectedExt}`;
+
+    const ensureExtension = name => {
+        if (!name) return '';
+        if (name.toLowerCase().endsWith(extSuffix.toLowerCase())) {
+            return name.slice(0, -extSuffix.length) + extSuffix;
+        }
+        return `${name}${extSuffix}`;
+    };
+
+    // 1. Content-Disposition: prefer RFC 5987 filename*=UTF-8''..., fall back to filename="..."
+    if (dispositionHeader && typeof dispositionHeader === 'string') {
+        let candidate = '';
+
+        // Match RFC 5987: filename*=UTF-8''<encoded> or filename*=charset'lang'<encoded>
+        const rfcMatch = dispositionHeader.match(/filename\*\s*=\s*(?:[A-Za-z0-9_-]+)'[^']*'([^;]+)/i);
+        if (rfcMatch && rfcMatch[1]) {
+            try {
+                const rawVal = rfcMatch[1].trim().replace(/^["']|["']$/g, '');
+                const decoded = decodeURIComponent(rawVal);
+                if (decoded) candidate = decoded;
+            } catch { /* ignore and fall through */ }
+        }
+
+        // Match standard filename="..." or filename=token
+        if (!candidate) {
+            const stdMatch = dispositionHeader.match(/filename\s*=\s*(?:"([^"]+)"|([^;\s]+))/i);
+            if (stdMatch) {
+                candidate = (stdMatch[1] || stdMatch[2] || '').trim();
+            }
+        }
+
+        if (candidate) {
+            candidate = candidate.replace(/^.*[\\/]/, '');
+            const sanitized = safeName(candidate);
+            if (sanitized && sanitized !== extSuffix && sanitized !== `.${expectedExt}`) {
+                return ensureExtension(sanitized);
+            }
+        }
+    }
+
+    // 2. Collection or track title from state.info (sanitized)
+    if (info) {
+        const rawTitle = info.title || info.name || '';
+        const sanitizedTitle = safeName(rawTitle);
+        if (sanitizedTitle) {
+            return ensureExtension(sanitizedTitle);
+        }
+    }
+
+    // 3. Generic fallback
+    if (isCollection) {
+        const dateStr = new Date().toISOString().slice(0, 10);
+        return `ripcord-playlist-${dateStr}.zip`;
+    }
+    return `ripcord.${cleanFmt}`;
+}
+
+// Multilingual title cleaner patterns.
+// Adding a language is a single one-line entry in LANG_PATTERNS with an array of junk phrases/tokens.
+// Matching lowers, NFKD-normalizes, strips combining marks, and folds ё->е for the test only.
+// Word-based languages use Unicode lookarounds (?<![\p{L}\p{N}]) ... (?![\p{L}\p{N}]), while CJK terms match anywhere.
+// Compiled once at startup with zero per-keystroke RegExp creation and no catastrophic backtracking.
+function normForTest(s) {
+    return s
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/\p{M}/gu, '')
+        .replace(/ё/g, 'е')
+        .replace(/['’ʼ]/g, "'");
+}
+
+const LANG_PATTERNS = {
+    en: ['official music video', 'official video', 'music video', 'official audio', 'official visualizer', 'lyric video', 'lyrics video', 'lyrics', 'lyric', 'visualizer', 'audio', 'remastered', 'remaster', 'explicit', 'clean version', 'hq', 'hd', '4k', '1080p', '720p'],
+    ro: ['videoclip oficial', 'clip oficial', 'audio oficial', 'versuri oficiale', 'versuri', 'videoclip'],
+    fr: ['clip officiel', 'video officielle', 'audio officiel', 'paroles', 'clip video', 'version acoustique', 'clip', 'officiel', 'officielle'],
+    ru: ['официальное видео', 'официальный клип', 'официальное аудио', 'официальный звук', 'текст песни', 'слова песни', 'премьера клипа', 'премьера трека', 'премьера', 'клип', 'музыкальное видео'],
+    pl: ['oficjalny teledysk', 'oficjalne video', 'oficjalne audio', 'tekst piosenki', 'z tekstem', 'teledysk', 'tekst', 'oficjalny', 'oficjalne'],
+    de: ['offizielles musikvideo', 'offizielles video', 'offizielles audio', 'songtext', 'mit text', 'musikvideo', 'offiziell', 'offizielles'],
+    es: ['videoclip oficial', 'video oficial', 'audio oficial', 'video con letra', 'letra', 'videoclip', 'oficial'],
+    it: ['videoclip ufficiale', 'video ufficiale', 'audio ufficiale', 'testo', 'videoclip', 'ufficiale'],
+    pt: ['videoclipe oficial', 'video oficial', 'audio oficial', 'com letra', 'letra', 'videoclipe'],
+    nl: ['officiele video', 'officiele audio', 'songtekst', 'met tekst', 'videoclip', 'officieel', 'officiele'],
+    tr: ['resmi muzik video', 'resmi video', 'resmi ses', 'resmi klip', 'sarki sozleri', 'sozleri', 'sozler', 'klip', 'resmi'],
+    uk: ['офіційне відео', 'офіційний кліп', 'офіційне аудіо', 'текст пісні', "прем'єра кліпу", 'премьера клипу', 'кліп', 'офіційне', 'офіційний'],
+    cs: ['oficialni videoklip', 'oficialni video', 'oficialni audio', 'text pisne', 's textem', 'videoklip', 'oficialni'],
+    hu: ['hivatalos videoklip', 'hivatalos video', 'hivatalos audio', 'dalszoveg', 'szoveggel', 'hivatalos', 'klip'],
+    cjk: ['公式mv', '公式ビデオ', '公式', '歌詞付き', '歌詞', 'ミュージックビデオ', '공식 뮤직비디오', '공식 mv', '공식', '뮤직비디오', '가사', '官方mv', '官方音樂錄影帶', '官方音乐视频', '官方', '歌词', '动态歌词']
+};
+
+const rawPhrases = Object.values(LANG_PATTERNS).flat();
+const cjkPhrases = [];
+const nonCjkPhrases = [];
+const isCjk = str => /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\uac00-\ud7af]/u.test(str);
+
+for (const phrase of rawPhrases) {
+    const norm = normForTest(phrase);
+    if (isCjk(norm)) cjkPhrases.push(norm);
+    else nonCjkPhrases.push(norm);
+}
+
+cjkPhrases.sort((a, b) => b.length - a.length);
+nonCjkPhrases.sort((a, b) => b.length - a.length);
+
+const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const cjkPattern = cjkPhrases.map(escapeRegExp).join('|');
+const nonCjkPattern = `(?<![\\p{L}\\p{N}])(?:${nonCjkPhrases.map(escapeRegExp).join('|')})(?![\\p{L}\\p{N}])`;
+
+const JUNK_TEST_REGEX = new RegExp(`${nonCjkPattern}|${cjkPattern}`, 'u');
+const JUNK_STRIP_REGEX = new RegExp(`${nonCjkPattern}|${cjkPattern}`, 'gu');
+const BRACKET_PAIR_REGEX = /\s*(\([^\)]*\)|\[[^\]]*\]|\{[^\}]*\}|【[^】]*】|（[^）]*）|［[^］]*］|｛[^｝]*｝|「[^」]*」|『[^』]*』|《[^》]*》|〈[^〉]*〉)/gu;
+const TRAILING_SEP_REGEX = /(?:[\s\-_—–−|｜/]+|\s*\/\/\s*)([^|｜/—–−-]+)$/u;
+
+function isJunkBracket(segment) {
+    const inner = segment.slice(1, -1).trim();
+    if (!inner) return false;
+    return JUNK_TEST_REGEX.test(normForTest(inner));
+}
+
+function stripTrailingJunk(str) {
+    let current = str;
+    for (let i = 0; i < 3; i++) {
+        const match = current.match(TRAILING_SEP_REGEX);
+        if (!match) break;
+        const tail = match[1].trim();
+        if (!tail) break;
+        const normTail = normForTest(tail);
+        if (!JUNK_TEST_REGEX.test(normTail)) break;
+        const stripped = normTail.replace(JUNK_STRIP_REGEX, '');
+        if (/\p{L}/u.test(stripped)) break;
+        current = current.slice(0, match.index).trim();
+    }
+    return current;
+}
 
 function tidyTitle(title) {
-    const cleaned = title.replace(JUNK, '').replace(/\s{2,}/g, ' ').trim();
+    if (!title || typeof title !== 'string') return title || '';
+    let current = title;
+    current = current.replace(BRACKET_PAIR_REGEX, match => (isJunkBracket(match) ? '' : match));
+    current = stripTrailingJunk(current);
+    const cleaned = current.replace(/\s{2,}/g, ' ').trim();
     return cleaned || title;
 }
 
@@ -132,6 +316,56 @@ function extractSingleVideoId(parsed) {
     else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
     else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
     return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
+}
+
+function isRealYouTubePlaylistId(list) {
+    if (!list || typeof list !== 'string') return false;
+    const trimmed = list.trim();
+    const upper = trimmed.toUpperCase();
+    if (upper.startsWith('RD') || upper.startsWith('UL')) return false;
+    // Real playlists on YouTube: PL (curated), OLAK5uy_ (YT Music album), UU (channel uploads), FL (favorites), LP
+    return /^(?:PL|OLAK5uy_|UU|FL|LP)[A-Za-z0-9_-]{8,}$/i.test(trimmed);
+}
+
+function detectYouTubePlaylistContext(raw) {
+    let value = (raw || '').trim();
+    if (!value) return null;
+    if (!/^https?:\/\//i.test(value)) value = 'https://' + value;
+    let parsed;
+    try {
+        parsed = new URL(value);
+    } catch {
+        return null;
+    }
+
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    const isYouTube = ['youtube.com', 'music.youtube.com', 'm.youtube.com', 'youtu.be']
+        .some(h => host === h || host.endsWith('.' + h));
+    if (!isYouTube) {
+        return null;
+    }
+
+    const videoId = extractSingleVideoId(parsed);
+    if (!videoId) {
+        return null;
+    }
+
+    const list = parsed.searchParams.get('list');
+    const startRadio = parsed.searchParams.get('start_radio') === '1';
+
+    if (!list || startRadio || !isRealYouTubePlaylistId(list)) {
+        return null;
+    }
+
+    const playlistHost = parsed.hostname === 'youtu.be' ? 'www.youtube.com' : parsed.hostname;
+    return {
+        playlistId: list,
+        singleTrackUrl: parsed.hostname === 'youtu.be'
+            ? `https://youtu.be/${videoId}`
+            : `https://${parsed.hostname}/watch?v=${videoId}`,
+        playlistUrl: `https://${playlistHost}/playlist?list=${list}`,
+        host: parsed.hostname
+    };
 }
 
 function normaliseUrl(raw) {
@@ -453,6 +687,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
 
 let toastTimer = 0;
 function toast(message, ms = 1000) {
+    logClientEvent('toast', message);
     el.snackbarText.textContent = message;
     el.snackbar.classList.add('show');
     clearTimeout(toastTimer);
@@ -460,10 +695,245 @@ function toast(message, ms = 1000) {
 }
 el.snackbarClose.addEventListener('click', () => el.snackbar.classList.remove('show'));
 
+// client error handling and diagnostics subsystem
+
+const ERROR_MESSAGES = {
+    INVALID_URL: {
+        message: 'Please enter a valid Spotify or YouTube link.',
+        action: 'try_another'
+    },
+    UNSUPPORTED_URL: {
+        message: 'This link is not supported. Please use a Spotify or YouTube track or playlist.',
+        action: 'try_another'
+    },
+    UNSUPPORTED_FORMAT: {
+        message: 'The requested audio format or bitrate is not supported.',
+        action: 'try_another'
+    },
+    MIX_NOT_SUPPORTED: {
+        message: 'YouTube Mix/Radio playlists are dynamic and cannot be downloaded as collections.',
+        action: 'try_another'
+    },
+    QUEUE_FULL: {
+        message: 'The server queue is currently full. Please wait a moment and try again.',
+        action: 'retry',
+        defaultRetrySeconds: 5
+    },
+    RATE_LIMITED: {
+        message: 'Server is busy. Please wait before trying again.',
+        action: 'retry',
+        defaultRetrySeconds: 60
+    },
+    SERVER_SHUTTING_DOWN: {
+        message: 'The server is restarting. Please try again shortly.',
+        action: 'retry',
+        defaultRetrySeconds: 10
+    },
+    AGE_RESTRICTED: {
+        message: "This video is age-restricted and can't be downloaded on this server.",
+        action: 'try_another'
+    },
+    LOGIN_REQUIRED: {
+        message: 'YouTube requires a login or bot verification to access this audio.',
+        action: 'try_another'
+    },
+    PRIVATE_OR_UNAVAILABLE: {
+        message: 'This track is private, deleted, or unavailable.',
+        action: 'try_another'
+    },
+    REGION_BLOCKED: {
+        message: 'This content is not available in the server’s region.',
+        action: 'try_another'
+    },
+    MEMBERS_ONLY: {
+        message: 'This video is restricted to channel members only.',
+        action: 'try_another'
+    },
+    LIVE_NOT_SUPPORTED: {
+        message: 'Live streams cannot be downloaded until they have concluded.',
+        action: 'try_another'
+    },
+    TOO_LARGE: {
+        message: 'The resulting audio file exceeds the server’s size limit.',
+        action: 'try_another'
+    },
+    TOO_LONG: {
+        message: 'This track exceeds the maximum allowed duration.',
+        action: 'try_another'
+    },
+    NETWORK_TIMEOUT: {
+        message: 'The connection to the upstream audio source timed out.',
+        action: 'retry',
+        defaultRetrySeconds: 5
+    },
+    NO_MATCH: {
+        message: 'Could not find a matching track for this Spotify song.',
+        action: 'try_another'
+    },
+    SPOTIFY_UNREADABLE: {
+        message: 'Track metadata is unavailable on Spotify.',
+        action: 'try_another'
+    },
+    ENCODE_FAILED: {
+        message: 'Audio encoding failed. Try a different format like MP3 or M4A.',
+        action: 'retry'
+    },
+    TIMEOUT: {
+        message: 'Audio processing timed out. Please try again.',
+        action: 'retry'
+    },
+    CANCELLED: {
+        message: 'The download was cancelled.',
+        action: null
+    },
+    INTERNAL: {
+        message: 'An internal server error occurred. Please try again.',
+        action: 'retry'
+    },
+    NETWORK_ERROR: {
+        message: 'Lost the network connection. Check your internet connection.',
+        action: 'retry'
+    }
+};
+
+function formatTrackFailure(code, error) {
+    switch (code) {
+        case 'AGE_RESTRICTED': return 'Age restricted';
+        case 'NO_MATCH': return 'No match found';
+        case 'RATE_LIMITED': return 'Rate limited';
+        case 'LOGIN_REQUIRED': return 'Bot check / login required';
+        case 'PRIVATE_OR_UNAVAILABLE': return 'Unavailable';
+        case 'REGION_BLOCKED': return 'Region blocked';
+        case 'MEMBERS_ONLY': return 'Members only';
+        case 'LIVE_NOT_SUPPORTED': return 'Live stream';
+        case 'TOO_LARGE': return 'Too large';
+        case 'TOO_LONG': return 'Too long';
+        case 'UNSUPPORTED_FORMAT': return 'Format error';
+        case 'ENCODE_FAILED': return 'Encode failed';
+        case 'NETWORK_TIMEOUT': return 'Network timeout';
+        case 'TIMEOUT': return 'Timed out';
+        default: return error || code || 'Skipped';
+    }
+}
+
+function normalizeError(data, httpStatus, requestId) {
+    const code = data?.code || (httpStatus === 429 ? 'RATE_LIMITED' : (httpStatus === 503 ? 'QUEUE_FULL' : (httpStatus >= 500 ? 'INTERNAL' : (httpStatus === 0 ? 'NETWORK_ERROR' : 'UNKNOWN'))));
+    const def = ERROR_MESSAGES[code] || {};
+    const message = def.message || data?.error || (httpStatus === 0 ? 'Lost connection. Check your internet.' : 'An error occurred.');
+    const action = data?.action || def.action || (def.defaultRetrySeconds ? 'retry' : 'try_another');
+    const retryAfterSeconds = data?.retryAfterSeconds || def.defaultRetrySeconds || null;
+
+    const err = new Error(message);
+    err.code = code;
+    err.httpStatus = httpStatus;
+    err.requestId = data?.requestId || requestId || null;
+    err.retryable = Boolean(data?.retryable || def.action === 'retry' || retryAfterSeconds);
+    err.action = action;
+    err.retryAfterSeconds = retryAfterSeconds;
+    return err;
+}
+
+function showErrorBanner(prefix, err, onRetry) {
+    state.currentError = err;
+    clearInterval(state.countdownTimer);
+    state.countdownTimer = null;
+
+    const banner = el[`${prefix}Error`];
+    const msg = el[`${prefix}ErrorMsg`];
+    const ref = el[`${prefix}ErrorRef`];
+    const actions = el[`${prefix}ErrorActions`];
+
+    if (!banner) return;
+
+    msg.textContent = err.message || 'An error occurred.';
+    if (err.requestId) {
+        ref.textContent = `Ref: ${String(err.requestId).slice(0, 8)}`;
+        ref.hidden = false;
+    } else {
+        ref.textContent = '';
+        ref.hidden = true;
+    }
+
+    actions.replaceChildren();
+
+    if (err.action === 'retry') {
+        const retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.className = 'btn btn--filled btn--sm';
+        let remaining = Number(err.retryAfterSeconds || 0);
+
+        if (remaining > 0) {
+            retryBtn.disabled = true;
+            retryBtn.textContent = `Retry (${remaining}s)`;
+            state.countdownTimer = setInterval(() => {
+                remaining -= 1;
+                if (remaining <= 0) {
+                    clearInterval(state.countdownTimer);
+                    state.countdownTimer = null;
+                    retryBtn.disabled = false;
+                    retryBtn.textContent = 'Retry';
+                } else {
+                    retryBtn.textContent = `Retry (${remaining}s)`;
+                }
+            }, 1000);
+        } else {
+            retryBtn.textContent = 'Retry';
+        }
+
+        retryBtn.addEventListener('click', () => {
+            clearInterval(state.countdownTimer);
+            state.countdownTimer = null;
+            clearErrorBanner(prefix);
+            onRetry?.();
+        });
+        actions.append(retryBtn);
+
+        const tryAnotherBtn = document.createElement('button');
+        tryAnotherBtn.type = 'button';
+        tryAnotherBtn.className = 'btn btn--tonal btn--sm';
+        tryAnotherBtn.textContent = 'Try another link';
+        tryAnotherBtn.addEventListener('click', resetToInput);
+        actions.append(tryAnotherBtn);
+
+    } else if (err.action === 'try_another') {
+        const tryAnotherBtn = document.createElement('button');
+        tryAnotherBtn.type = 'button';
+        tryAnotherBtn.className = 'btn btn--filled btn--sm';
+        tryAnotherBtn.textContent = 'Try another link';
+        tryAnotherBtn.addEventListener('click', resetToInput);
+        actions.append(tryAnotherBtn);
+    }
+
+    banner.hidden = false;
+}
+
+function clearErrorBanner(prefix) {
+    clearInterval(state.countdownTimer);
+    state.countdownTimer = null;
+    const banner = el[`${prefix}Error`];
+    if (banner) banner.hidden = true;
+}
+
+function resetToInput() {
+    clearErrorBanner('input');
+    clearErrorBanner('options');
+    el.url.value = '';
+    syncPasteButton();
+    setFieldError('');
+    go('input', 'back');
+    el.url.focus();
+}
+
 // open and close the about dialog
 
-el.aboutBtn.addEventListener('click', () => el.about.showModal());
-el.aboutClose.addEventListener('click', () => el.about.close());
+el.aboutBtn.addEventListener('click', () => {
+    logClientEvent('action', 'Opened about dialog');
+    el.about.showModal();
+});
+el.aboutClose.addEventListener('click', () => {
+    logClientEvent('action', 'Closed about dialog');
+    el.about.close();
+});
 el.about.addEventListener('click', event => {
     const rect = el.about.getBoundingClientRect();
     const isInDialog = (
@@ -501,6 +971,7 @@ const FOCUS_TARGET = {
 };
 
 function go(stage, dir = 'forward') {
+    logClientEvent('transition', `Transition to ${stage} (${dir})`);
     const apply = () => {
         state.stage = stage;
         body.dataset.stage = stage;
@@ -548,19 +1019,23 @@ function syncPasteButton() {
 el.url.addEventListener('input', () => {
     syncPasteButton();
     if (el.search.dataset.invalid === 'true') setFieldError('');
+    clearErrorBanner('input');
 });
 
 el.pasteBtn.addEventListener('click', async () => {
     if (el.url.value) {
+        logClientEvent('action', 'Cleared search input');
         el.url.value = '';
         syncPasteButton();
         setFieldError('');
+        clearErrorBanner('input');
         el.url.focus();
         return;
     }
     try {
         const text = await navigator.clipboard.readText();
         if (text) {
+            logClientEvent('action', 'Pasted link from clipboard');
             el.url.value = text.trim();
             syncPasteButton();
             submitUrl();
@@ -576,6 +1051,7 @@ document.addEventListener('paste', event => {
     if (state.stage !== 'input' || document.activeElement === el.url) return;
     const text = event.clipboardData?.getData('text');
     if (!text) return;
+    logClientEvent('action', 'Page paste detected');
     el.url.value = text.trim();
     syncPasteButton();
     submitUrl();
@@ -598,35 +1074,67 @@ function setFetching(on) {
     el.fetchLabel.textContent = on ? 'Looking it up' : 'Continue';
 }
 
+let fetchController = null;
+let fetchRequestId = 0;
 let fetching = false;
+
 async function submitUrl() {
     if (fetching) return;
-    const url = normaliseUrl(el.url.value);
+    const rawVal = el.url.value;
+    const playlistCtx = detectYouTubePlaylistContext(rawVal);
+    const url = normaliseUrl(rawVal);
     if (!url) {
-        setFieldError(el.url.value.trim()
+        const msg = rawVal.trim()
             ? 'That does not look like a Spotify or YouTube link.'
-            : 'Paste a link first.');
+            : 'Paste a link first.';
+        setFieldError(msg);
+        showErrorBanner('input', normalizeError({ code: 'INVALID_URL', error: msg }, 400), () => submitUrl());
         el.url.focus();
         return;
     }
+    state.playlistContext = playlistCtx;
+    state.mode = 'track';
+
+    if (fetchController) {
+        fetchController.abort();
+    }
+    fetchController = new AbortController();
+    const fetchId = ++fetchRequestId;
+
     el.url.value = url;
     setFieldError('');
+    clearErrorBanner('input');
     fetching = true;
     setFetching(true);
+    logClientEvent('api', 'Fetching metadata');
     try {
-        const res = await fetch(`/api/fetch-info?url=${encodeURIComponent(url)}`);
+        const params = new URLSearchParams({ url });
+        const res = await fetch(`/api/fetch-info?${params.toString()}`, {
+            signal: fetchController.signal
+        });
+        if (fetchId !== fetchRequestId) return;
+        const requestId = res.headers.get('x-request-id') || '';
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again.');
+        if (!res.ok) throw normalizeError(data, res.status, requestId);
+        logClientEvent('api', 'Metadata fetched successfully', { type: data.type, trackCount: data.trackCount || 1, requestId });
         state.url = data.url || url;
         el.url.value = state.url;
         state.info = data;
+        state.mode = data.type === 'collection' ? 'playlist' : 'track';
         showOptions();
         remember(state.url, data);
     } catch (err) {
-        setFieldError(err.message);
+        if (fetchId !== fetchRequestId || err.name === 'AbortError') return;
+        logClientEvent('error', `Metadata fetch failed: [${err.code || 'UNKNOWN'}] ${err.message}`, {
+            code: err.code,
+            requestId: err.requestId
+        });
+        showErrorBanner('input', err, () => submitUrl());
     } finally {
-        fetching = false;
-        setFetching(false);
+        if (fetchId === fetchRequestId) {
+            fetching = false;
+            setFetching(false);
+        }
     }
 }
 
@@ -712,37 +1220,90 @@ function refreshName() {
     if (!nameTouched) el.filename.value = suggestedName();
 }
 
+function crossfadeText(elem, newText) {
+    if (!elem || elem.textContent === newText) return;
+    if (reduceMotion.matches) {
+        elem.textContent = newText;
+        return;
+    }
+    elem.style.opacity = '0.2';
+    requestAnimationFrame(() => {
+        elem.textContent = newText;
+        elem.style.opacity = '1';
+    });
+}
+
+function updateSegmented(seg) {
+    if (!seg) return;
+    const checked = seg.querySelector('input:checked');
+    if (!checked) return;
+    const label = checked.closest('label');
+    if (!label) return;
+    const segRect = seg.getBoundingClientRect();
+    const labelRect = label.getBoundingClientRect();
+    if (segRect.width === 0) return;
+    const left = labelRect.left - segRect.left;
+    const width = labelRect.width;
+    seg.style.setProperty('--indicator-left', `${left}px`);
+    seg.style.setProperty('--indicator-width', `${width}px`);
+    seg.style.setProperty('--indicator-opacity', '1');
+    seg.dataset.ready = 'true';
+}
+
+function updateAllSegmented() {
+    $$('.segmented').forEach(updateSegmented);
+}
+
+if (typeof ResizeObserver !== 'undefined') {
+    const segObserver = new ResizeObserver(entries => {
+        for (const entry of entries) updateSegmented(entry.target);
+    });
+    $$('.segmented').forEach(s => segObserver.observe(s));
+}
+window.addEventListener('resize', updateAllSegmented);
+if (document.fonts) document.fonts.ready.then(updateAllSegmented);
+
 function refreshFormat() {
     const fmt = currentFormat();
     const lossless = LOSSLESS.has(fmt);
     el.ext.textContent = `.${fmt}`;
-    el.formatHint.textContent = FORMAT_HINTS[fmt];
-    el.qualityGroup.dataset.disabled = String(lossless);
+    crossfadeText(el.formatHint, FORMAT_HINTS[fmt]);
+    el.qualityGroup.dataset.collapsed = String(lossless);
+    el.qualityGroup.inert = lossless;
+    el.qualityGroup.setAttribute('aria-hidden', String(lossless));
     el.bitrate.disabled = lossless;
-    el.bitrateOut.textContent = lossless ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`;
+    crossfadeText(el.bitrateOut, lossless ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`);
+    updateSegmented($('#format-group'));
 }
 
 function refreshSlider() {
     const pct = (el.bitrate.value / (el.bitrate.max - el.bitrate.min)) * 100;
     el.bitrate.parentElement.style.setProperty('--slider-position', `${pct}%`);
-    el.bitrateOut.textContent = LOSSLESS.has(currentFormat()) ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`;
+    crossfadeText(el.bitrateOut, LOSSLESS.has(currentFormat()) ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`);
 }
 
-$$('input[name="format"]').forEach(i => i.addEventListener('change', refreshFormat));
-$$('input[name="namestyle"]').forEach(i => i.addEventListener('change', () => { nameTouched = false; refreshName(); }));
+$$('input[name="format"]').forEach(i => {
+    i.addEventListener('change', refreshFormat);
+    i.addEventListener('input', refreshFormat);
+});
+$$('input[name="namestyle"]').forEach(i => i.addEventListener('change', () => {
+    nameTouched = false;
+    refreshName();
+    updateSegmented($('#name-style'));
+}));
 el.clean.addEventListener('change', () => { nameTouched = false; refreshName(); });
 el.bitrate.addEventListener('input', refreshSlider);
 el.filename.addEventListener('input', () => { nameTouched = true; });
 
 function showOptions() {
     const info = state.info;
-    const isCollection = info.type === 'collection';
+    const isCollection = state.mode === 'playlist' || info.type === 'collection';
     const isSpotify = /spotify\.com/i.test(state.url);
 
     // fill in the title and cover art before showing the screen
     el.mediaTitle.textContent = info.title;
     el.mediaArtist.textContent = isCollection
-        ? `${info.trackCount} ${info.trackCount === 1 ? 'track' : 'tracks'}`
+        ? `${info.trackCount} ${info.trackCount === 1 ? 'track' : 'tracks'}${info.trackCount >= 30 ? ' (capped at 30)' : ''}`
         : (info.artist || '');
     el.badgeText.textContent = isCollection ? 'Collection' : 'Track';
     $('.icon', el.badge).textContent = isCollection ? 'library_music' : 'music_note';
@@ -764,13 +1325,112 @@ function showOptions() {
     refreshName();
     refreshFormat();
     refreshSlider();
+    requestAnimationFrame(() => updateAllSegmented());
 
     el.downloadLabel.textContent = isCollection
         ? `Download ${info.trackCount} tracks as ZIP`
         : 'Download';
 
+    updatePlaylistCallout();
+
     go('options', 'forward');
 }
+
+function updatePlaylistCallout() {
+    if (!el.playlistCallout) return;
+    const ctx = state.playlistContext;
+    if (!ctx || !ctx.playlistId) {
+        el.playlistCallout.hidden = true;
+        return;
+    }
+
+    el.playlistCallout.hidden = false;
+    el.playlistToggleBtn.hidden = false;
+
+    if (state.mode === 'playlist') {
+        el.playlistCalloutText.textContent = 'Viewing full playlist.';
+        el.playlistCalloutCap.hidden = false;
+        el.playlistCalloutCap.textContent = 'Playlists are capped at up to 30 tracks.';
+        el.playlistToggleBtn.textContent = 'Just this track';
+    } else {
+        el.playlistCalloutText.textContent = 'This track is part of a playlist.';
+        el.playlistCalloutCap.hidden = true;
+        el.playlistToggleBtn.textContent = 'Use the whole playlist';
+    }
+}
+
+let mediaSwitchController = null;
+let mediaSwitchId = 0;
+
+async function switchMediaMode(nextMode, targetUrl) {
+    if (fetching) return;
+
+    if (mediaSwitchController) {
+        mediaSwitchController.abort();
+    }
+    mediaSwitchController = new AbortController();
+    const switchId = ++mediaSwitchId;
+
+    fetching = true;
+    el.playlistToggleBtn.disabled = true;
+    el.playlistToggleBtn.textContent = 'Loading...';
+    el.screenOptions?.setAttribute('aria-busy', 'true');
+    clearErrorBanner('options');
+
+    logClientEvent('action', `Switching media mode to ${nextMode}`, { targetUrl });
+
+    try {
+        const res = await fetch(`/api/fetch-info?${new URLSearchParams({ url: targetUrl })}`, {
+            signal: mediaSwitchController.signal
+        });
+        if (switchId !== mediaSwitchId) return;
+
+        const requestId = res.headers.get('x-request-id') || '';
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw normalizeError(data, res.status, requestId);
+
+        state.mode = nextMode;
+        state.url = data.url || targetUrl;
+        el.url.value = state.url;
+        state.info = data;
+        nameTouched = false;
+
+        logClientEvent('api', `Switched mode to ${nextMode} successfully`, {
+            type: data.type,
+            trackCount: data.trackCount || 1,
+            requestId
+        });
+
+        showOptions();
+        remember(state.url, data);
+    } catch (err) {
+        if (switchId !== mediaSwitchId || err.name === 'AbortError') return;
+        logClientEvent('error', `Failed to switch mode to ${nextMode}: [${err.code || 'UNKNOWN'}] ${err.message}`, {
+            code: err.code,
+            requestId: err.requestId
+        });
+        showErrorBanner('options', err,
+            () => switchMediaMode(nextMode, targetUrl),
+            () => switchMediaMode(nextMode, targetUrl)
+        );
+    } finally {
+        if (switchId === mediaSwitchId) {
+            fetching = false;
+            el.playlistToggleBtn.disabled = false;
+            el.screenOptions?.removeAttribute('aria-busy');
+            updatePlaylistCallout();
+        }
+    }
+}
+
+el.playlistToggleBtn?.addEventListener('click', () => {
+    if (!state.playlistContext || !state.playlistContext.playlistId) return;
+    const nextMode = state.mode === 'track' ? 'playlist' : 'track';
+    const targetUrl = nextMode === 'playlist'
+        ? state.playlistContext.playlistUrl
+        : state.playlistContext.singleTrackUrl;
+    switchMediaMode(nextMode, targetUrl);
+});
 
 el.backBtn.addEventListener('click', () => {
     resetSeed();
@@ -780,6 +1440,7 @@ el.backBtn.addEventListener('click', () => {
 // handle starting the download
 
 function startDownload() {
+    clearErrorBanner('options');
     const info = state.info;
     const isCollection = info.type === 'collection';
     const fmt = currentFormat();
@@ -792,6 +1453,9 @@ function startDownload() {
         if (customTitle) params.set('title', customTitle);
     }
     const saveName = isCollection ? `${safeName(info.title) || 'ripcord'}.zip` : `${name}.${fmt}`;
+    state.blobName = saveName;
+
+    logClientEvent('action', 'Initiated download', { format: fmt, bitrate, isCollection });
 
     el.workingTitle.textContent = isCollection ? 'Packing up your collection' : 'Pulling the sound out';
     el.metaLeft.textContent = 'Getting started';
@@ -835,19 +1499,41 @@ function startDownload() {
         if (xhr.status >= 200 && xhr.status < 300) {
             setProgress(1);
             state.blob = xhr.response;
-            state.blobName = saveName;
+            const dispositionHeader = xhr.getResponseHeader('Content-Disposition') || '';
+            state.blobName = resolveDownloadName(dispositionHeader, info, isCollection, fmt);
+            const noteHeader = xhr.getResponseHeader('X-Ripcord-Note');
+            if (noteHeader) {
+                logClientEvent('api', `Server note: ${noteHeader}`);
+            }
+            logClientEvent('api', 'Download completed successfully', { status: xhr.status, size: state.blob.size, name: state.blobName });
+
+            if (isCollection && state.jobId) {
+                try {
+                    const finalRes = await fetch(`/api/progress/${encodeURIComponent(state.jobId)}`, { cache: 'no-store' });
+                    if (finalRes.ok) {
+                        const finalJob = await finalRes.json();
+                        applyJob(finalJob);
+                    }
+                } catch { /* proceed with last known state */ }
+            }
+
             saveBlob();
             finish(isCollection);
         } else {
-            let message = 'The download failed. Please try again.';
+            let data = {};
+            const requestId = xhr.getResponseHeader('X-Request-Id') || '';
             try {
-                const data = JSON.parse(await xhr.response.text());
-                if (data.error) message = data.error;
-            } catch { /* keep the generic message */ }
-            fail(message);
+                data = JSON.parse(await xhr.response.text());
+            } catch { /* keep generic */ }
+            const err = normalizeError(data, xhr.status, requestId);
+            fail(err);
         }
     };
-    xhr.onerror = () => { stopTimer(); fail('Lost the connection. Check your network and try again.'); };
+    xhr.onerror = () => {
+        stopTimer();
+        const err = normalizeError({ code: 'NETWORK_ERROR' }, 0);
+        fail(err);
+    };
     xhr.onabort = () => { stopTimer(); };
 
     xhr.send();
@@ -949,7 +1635,7 @@ function renderTrackList(tracks) {
         status.className = 'track__status';
         li.append(num, text, status);
         fragment.append(li);
-        const row = { li, status, key: '' };
+        const row = { li, text, status, key: '' };
         state.rows.push(row);
         updateTrackRow(row, { state: 'queued', progress: 0 });
     });
@@ -960,15 +1646,32 @@ function updateTrackRow(row, track) {
     const info = TRACK_STATES[track.state] || TRACK_STATES.queued;
     const pct = Math.round((Number(track.progress) || 0) * 100);
     const determinate = track.state === 'downloading' && pct > 0;
-    const key = `${track.state}:${determinate ? pct : ''}:${track.error || ''}`;
+    const failureReason = track.state === 'failed' ? formatTrackFailure(track.code, track.error) : '';
+    const note = track.note || '';
+    const key = `${track.state}:${determinate ? pct : ''}:${failureReason}:${note}`;
     if (row.key === key) return;
     row.key = key;
     row.li.dataset.state = track.state in TRACK_STATES ? track.state : 'queued';
 
+    if (note && !row.li.querySelector('.track__note')) {
+        const noteBadge = document.createElement('span');
+        noteBadge.className = 'track__note';
+        noteBadge.textContent = note === 'alternate version used' ? 'alternate version' : note;
+        const sub = row.text ? row.text.querySelector('.track__sub') : null;
+        if (sub) {
+            sub.append(' · ', noteBadge);
+        } else if (row.text) {
+            row.text.append(noteBadge);
+        }
+    }
+
     const label = document.createElement('span');
-    label.textContent = track.state === 'failed' && track.error
-        ? track.error
-        : determinate ? `${info.label} ${pct}%` : info.label;
+    if (track.state === 'failed') {
+        label.textContent = `Skipped: ${failureReason}`;
+        row.li.title = track.error || failureReason;
+    } else {
+        label.textContent = determinate ? `${info.label} ${pct}%` : info.label;
+    }
 
     let indicator;
     if (info.spinner) {
@@ -999,20 +1702,28 @@ function scrollRowIntoView(index) {
 }
 
 function applyJob(job) {
+    state.lastJob = job;
     const tracks = Array.isArray(job.tracks) ? job.tracks : [];
     if (!tracks.length) return;
     if (tracks.length !== state.rows.length) renderTrackList(tracks);
     tracks.forEach((track, i) => updateTrackRow(state.rows[i], track));
 
-    const total = tracks.length;
-    const processed = tracks.filter(t => t.state === 'done' || t.state === 'failed').length;
-    const failed = tracks.filter(t => t.state === 'failed').length;
-    const overall = tracks.reduce((sum, t) => sum + trackFraction(t), 0) / total;
+    const summary = job.summary || {
+        total: tracks.length,
+        ok: tracks.filter(t => t.state === 'done').length,
+        failed: tracks.filter(t => t.state === 'failed')
+    };
+
+    const total = summary.total || tracks.length;
+    const failedCount = Array.isArray(summary.failed) ? summary.failed.length : tracks.filter(t => t.state === 'failed').length;
+    const okCount = tracks.filter(t => t.state === 'done').length;
+    const processed = Math.min(total, okCount + failedCount);
+    const overall = tracks.reduce((sum, t) => sum + trackFraction(t), 0) / (total || 1);
 
     const current = Math.min(total, processed + 1);
     const phase = processed >= total ? 'Zipping up' : `Downloading ${current} of ${total}`;
     const pct = setProgress(overall, phase);
-    el.metaLeft.textContent = `${phase} · ${pct}%${failed ? ` · ${failed} failed` : ''}`;
+    el.metaLeft.textContent = `${phase} · ${pct}%${failedCount ? ` · ${failedCount} skipped` : ''}`;
 
     const active = tracks.findIndex(t => t.state === 'matching' || t.state === 'downloading' || t.state === 'encoding');
     if (active !== -1 && active !== state.activeRow) {
@@ -1046,6 +1757,10 @@ function stopPolling() {
 
 function saveBlob() {
     if (!state.blob) return;
+    if (!state.blobName) {
+        const isCollection = state.mode === 'playlist' || state.info?.type === 'collection';
+        state.blobName = resolveDownloadName('', state.info, isCollection, currentFormat());
+    }
     const href = URL.createObjectURL(state.blob);
     const a = document.createElement('a');
     a.href = href;
@@ -1056,17 +1771,74 @@ function saveBlob() {
     setTimeout(() => URL.revokeObjectURL(href), 60000);
 }
 
-function fail(message) {
+function fail(err) {
     state.xhr = null;
-    toast(message, 6500);
+    logClientEvent('error', `Download failed: [${err.code || 'UNKNOWN'}] ${err.message}`, {
+        code: err.code,
+        requestId: err.requestId
+    });
     go('options', 'back');
+    showErrorBanner('options', err, () => startDownload());
+}
+
+function updateSkippedToggleLabel(failedCount, isExpanded) {
+    const count = Number.isSafeInteger(failedCount) && failedCount > 0 ? failedCount : 1;
+    const noun = count === 1 ? '1 track' : `${count} tracks`;
+    const action = isExpanded ? '(click to hide)' : '(click to see why)';
+    el.doneSkippedToggleText.textContent = `${noun} could not be downloaded ${action}`;
 }
 
 function finish(isCollection) {
     state.xhr = null;
-    el.doneSub.textContent = isCollection
-        ? 'Your ZIP should be in your downloads folder.'
-        : 'Your file should be in your downloads folder.';
+    if (isCollection && state.lastJob) {
+        const summary = state.lastJob.summary || {
+            total: (state.lastJob.tracks || []).length,
+            ok: (state.lastJob.tracks || []).filter(t => t.state === 'done').length,
+            failed: (state.lastJob.tracks || []).filter(t => t.state !== 'done').map((t, i) => ({
+                index: i,
+                title: t.title,
+                artist: t.artist,
+                code: t.code,
+                error: t.error
+            }))
+        };
+        const total = summary.total;
+        const failedTracks = Array.isArray(summary.failed) ? summary.failed : [];
+        const failedCount = failedTracks.length;
+        // Invariant: ready + skipped === total
+        const readyCount = Math.max(0, total - failedCount);
+
+        if (failedCount > 0) {
+            el.doneTitle.textContent = `${readyCount} of ${total} ready, ${failedCount} skipped`;
+            el.doneSub.textContent = 'Your ZIP should be in your downloads folder.';
+            el.doneSkipped.hidden = false;
+            el.doneSkippedPanel.hidden = true;
+            el.doneSkippedToggle.setAttribute('aria-expanded', 'false');
+            updateSkippedToggleLabel(failedCount, false);
+            el.doneSkippedList.replaceChildren();
+
+            failedTracks.forEach(t => {
+                const li = document.createElement('li');
+                li.className = 'done-skipped__item';
+                const titleSpan = document.createElement('span');
+                titleSpan.className = 'done-skipped__title';
+                titleSpan.textContent = `${t.title || 'Track'}${t.artist ? ` - ${t.artist}` : ''}`;
+                const reasonSpan = document.createElement('span');
+                reasonSpan.className = 'done-skipped__reason';
+                reasonSpan.textContent = formatTrackFailure(t.code, t.error);
+                li.append(titleSpan, reasonSpan);
+                el.doneSkippedList.append(li);
+            });
+        } else {
+            el.doneTitle.textContent = 'All done. Enjoy!';
+            el.doneSub.textContent = 'Your ZIP should be in your downloads folder.';
+            el.doneSkipped.hidden = true;
+        }
+    } else {
+        el.doneTitle.textContent = 'All done. Enjoy!';
+        el.doneSub.textContent = 'Your file should be in your downloads folder.';
+        el.doneSkipped.hidden = true;
+    }
     go('done', 'forward');
     celebrate();
 }
@@ -1086,8 +1858,22 @@ function celebrate() {
     }
 }
 
-el.downloadBtn.addEventListener('click', startDownload);
+el.doneSkippedToggle.addEventListener('click', () => {
+    const isHidden = el.doneSkippedPanel.hidden;
+    const willOpen = isHidden;
+    el.doneSkippedPanel.hidden = !willOpen;
+    el.doneSkippedToggle.setAttribute('aria-expanded', String(willOpen));
+    const failedCount = (state.lastJob?.summary?.failed || []).length || (state.lastJob?.tracks || []).filter(t => t.state === 'failed').length || 1;
+    updateSkippedToggleLabel(failedCount, willOpen);
+    logClientEvent('action', willOpen ? 'Expanded skipped tracks' : 'Collapsed skipped tracks');
+});
+
+el.downloadBtn.addEventListener('click', () => {
+    clearErrorBanner('options');
+    startDownload(false);
+});
 el.cancelBtn.addEventListener('click', () => {
+    logClientEvent('action', 'Cancelled download');
     state.jobId = '';
     stopPolling();
     if (state.xhr) state.xhr.abort();
@@ -1095,10 +1881,18 @@ el.cancelBtn.addEventListener('click', () => {
     toast('Cancelled.');
     go('options', 'back');
 });
-el.saveBtn.addEventListener('click', saveBlob);
+el.saveBtn.addEventListener('click', () => {
+    logClientEvent('action', 'Saved audio file again');
+    saveBlob();
+});
 el.againBtn.addEventListener('click', () => {
+    logClientEvent('action', 'Resetting to rip another track');
     state.blob = null;
+    state.blobName = '';
     state.info = null;
+    state.lastJob = null;
+    clearErrorBanner('input');
+    clearErrorBanner('options');
     el.url.value = '';
     syncPasteButton();
     setFieldError('');
@@ -1115,6 +1909,13 @@ setupSpin();
 syncThemeColorMeta();
 initColourEngine();
 
+if (isDev) {
+    window.resolveDownloadName = resolveDownloadName;
+    window.state = state;
+    window.finish = finish;
+}
+
 setTimeout(() => {
     delete root.dataset.intro;
 }, 1350);
+

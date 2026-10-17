@@ -8,7 +8,12 @@ npm-debug.log
 .agents
 .claude
 cookies.txt
+cookies
+age_cookies
+*.cookies
+ripcord_cookie_*.tmp
 logs
 *.log
 /tmp
 scratch
+/cookies
